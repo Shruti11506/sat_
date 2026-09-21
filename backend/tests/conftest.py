@@ -1,0 +1,22 @@
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from tests.fakes import FakeSupabaseClient
+
+
+@pytest.fixture
+def fake_supabase(monkeypatch):
+    fake = FakeSupabaseClient()
+
+    monkeypatch.setattr("app.api.routes.health.get_supabase", lambda: fake)
+    monkeypatch.setattr("app.services.imagery_service.get_supabase", lambda: fake)
+    monkeypatch.setattr("app.services.job_service.get_supabase", lambda: fake)
+    monkeypatch.setattr("app.services.result_service.get_supabase", lambda: fake)
+
+    return fake
+
+
+@pytest.fixture
+def client(fake_supabase):
+    return TestClient(app)

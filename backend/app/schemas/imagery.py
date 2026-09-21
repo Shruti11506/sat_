@@ -1,0 +1,47 @@
+"""Pydantic schemas for the imagery resource."""
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+class ImageryCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    source: str | None = Field(default=None, description="e.g. Sentinel-2, Cartosat-3")
+    sensor: str | None = Field(default=None, description="e.g. MSI, PAN")
+    acquisition_date: datetime | None = None
+    file_path: str | None = Field(default=None, description="Path inside the Supabase Storage bucket")
+    storage_url: str | None = None
+    cloud_cover: float | None = Field(default=None, ge=0, le=100)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    bbox: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ImageryCreateResponse(BaseModel):
+    id: UUID
+    name: str
+    status: str = "registered"
+
+
+class ImageryOut(BaseModel):
+    id: UUID
+    name: str
+    source: str | None = None
+    sensor: str | None = None
+    acquisition_date: datetime | None = None
+    file_path: str | None = None
+    storage_url: str | None = None
+    cloud_cover: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    bbox: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
+class ImageryDeleteResponse(BaseModel):
+    id: UUID
+    status: str = "deleted"
