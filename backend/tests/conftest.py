@@ -10,6 +10,7 @@ def fake_supabase(monkeypatch):
     fake = FakeSupabaseClient()
 
     monkeypatch.setattr("app.api.routes.health.get_supabase", lambda: fake)
+    monkeypatch.setattr("app.api.routes.imagery.get_supabase", lambda: fake)
     monkeypatch.setattr("app.services.imagery_service.get_supabase", lambda: fake)
     monkeypatch.setattr("app.services.job_service.get_supabase", lambda: fake)
     monkeypatch.setattr("app.services.result_service.get_supabase", lambda: fake)

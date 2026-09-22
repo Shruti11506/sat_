@@ -1,23 +1,24 @@
 "use client"
 
 import * as React from "react"
-import { 
-  SquarePen, 
-  Image as ImageIcon, 
-  Puzzle, 
-  Compass, 
-  GitCompare, 
-  BarChart3, 
-  Sparkles, 
-  Settings, 
-  HelpCircle, 
-  User, 
-  MoreHorizontal, 
-  Trash2,
+import {
+  SquarePen,
+  Image as ImageIcon,
+  Puzzle,
+  Compass,
+  GitCompare,
+  BarChart3,
+  Sparkles,
+  Settings,
+  HelpCircle,
+  User,
+  MoreHorizontal,
   Share2,
   Clock,
   Sun,
-  Moon
+  Moon,
+  AlertCircle,
+  RefreshCw
 } from "lucide-react"
 
 import {
@@ -29,117 +30,86 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarTrigger,
   useSidebar
 } from "@/components/ui/sidebar"
 import { ChitravitsEmblem } from "./ui/ChitravitsLogo"
+import { getAnalysisHistory, type HistoryItem as ApiHistoryItem } from "../lib/apiClient"
 
 interface UserHistorySidebarProps {
   onNewChat: () => void
-  onSelectScenario: (scenarioId: string) => void
+  onSelectHistoryItem: (item: ApiHistoryItem) => void
   onNavigateScreen: (screenId: string) => void
   activeScreen: string
-  currentScenarioId?: string
+  activeImageryId?: string | null
+  refreshToken?: number
   theme: string
   onToggleTheme: () => void
 }
 
-interface ChatHistoryItem {
-  id: string
-  title: string
-  dateGroup: "today" | "sevenDays" | "thirtyDays"
-  scenarioId?: string
-  screenTarget?: string
+type DateGroup = "today" | "sevenDays" | "thirtyDays" | "older"
+
+function groupForDate(iso: string): DateGroup {
+  const created = new Date(iso).getTime()
+  const now = Date.now()
+  const days = (now - created) / (1000 * 60 * 60 * 24)
+  if (days < 1) return "today"
+  if (days < 7) return "sevenDays"
+  if (days < 30) return "thirtyDays"
+  return "older"
 }
 
-const INITIAL_HISTORY: ChatHistoryItem[] = [
-  {
-    id: "hist-1",
-    title: "Bengaluru Cartosat-3 Optical & SAR",
-    dateGroup: "today",
-    scenarioId: "bengaluru-urban"
-  },
-  {
-    id: "hist-2",
-    title: "Ulsoor Lake NDWI Water Boundary",
-    dateGroup: "today",
-    scenarioId: "bengaluru-urban"
-  },
-  {
-    id: "hist-3",
-    title: "142 Permanent Buildings Radar Backscatter",
-    dateGroup: "today",
-    scenarioId: "bengaluru-urban"
-  },
-  {
-    id: "hist-4",
-    title: "Bi-Temporal Delta 2021 vs 2026",
-    dateGroup: "sevenDays",
-    screenTarget: "change"
-  },
-  {
-    id: "hist-5",
-    title: "Riparian Buffer Vegetation Canopy (NDVI)",
-    dateGroup: "sevenDays",
-    scenarioId: "bengaluru-urban"
-  },
-  {
-    id: "hist-6",
-    title: "Optical + SAR Deep Learning Fusion",
-    dateGroup: "sevenDays",
-    screenTarget: "fusion"
-  },
-  {
-    id: "hist-7",
-    title: "ISRO 7-Stage Agent Pipeline Trace",
-    dateGroup: "thirtyDays",
-    screenTarget: "pipeline"
-  },
-  {
-    id: "hist-8",
-    title: "EPSG:4326 Datum Georeferencing Bounds",
-    dateGroup: "thirtyDays",
-    screenTarget: "analytics"
-  }
-]
+function truncate(text: string, max = 60): string {
+  if (!text) return ""
+  return text.length > max ? text.slice(0, max - 1) + "…" : text
+}
 
 export function UserHistorySidebar({
   onNewChat,
-  onSelectScenario,
+  onSelectHistoryItem,
   onNavigateScreen,
   activeScreen,
-  currentScenarioId,
+  activeImageryId,
+  refreshToken,
   theme,
   onToggleTheme
 }: UserHistorySidebarProps) {
-  const [historyList, setHistoryList] = React.useState<ChatHistoryItem[]>(INITIAL_HISTORY)
-  const [activeItemId, setActiveItemId] = React.useState<string>("hist-1")
+  // Real backend data ONLY -- see CLAUDE.md / backend README. No hardcoded
+  // entries, and a failed fetch never falls back to stale/sample data.
+  const [historyList, setHistoryList] = React.useState<ApiHistoryItem[]>([])
+  const [status, setStatus] = React.useState<"loading" | "ready" | "error">("loading")
   const { isMobile, setOpenMobile } = useSidebar()
 
-  const handleItemClick = (item: ChatHistoryItem) => {
-    setActiveItemId(item.id)
-    if (item.screenTarget) {
-      onNavigateScreen(item.screenTarget)
-    } else if (item.scenarioId) {
-      onSelectScenario(item.scenarioId)
-      onNavigateScreen("workspace")
-    }
+  const fetchHistory = React.useCallback(() => {
+    setStatus("loading")
+    getAnalysisHistory(100)
+      .then((items) => {
+        setHistoryList(items)
+        setStatus("ready")
+      })
+      .catch((err) => {
+        console.error("[SatQuery] Failed to load analysis history:", err)
+        setHistoryList([])
+        setStatus("error")
+      })
+  }, [])
+
+  React.useEffect(() => {
+    fetchHistory()
+  }, [fetchHistory, refreshToken])
+
+  const handleItemClick = (item: ApiHistoryItem) => {
+    onSelectHistoryItem(item)
     if (isMobile) {
       setOpenMobile(false)
     }
   }
 
-  const handleDeleteItem = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation()
-    setHistoryList(prev => prev.filter(item => item.id !== id))
-  }
-
-  const todayItems = historyList.filter(i => i.dateGroup === "today")
-  const sevenDaysItems = historyList.filter(i => i.dateGroup === "sevenDays")
-  const thirtyDaysItems = historyList.filter(i => i.dateGroup === "thirtyDays")
+  const todayItems = historyList.filter(i => groupForDate(i.created_at) === "today")
+  const sevenDaysItems = historyList.filter(i => groupForDate(i.created_at) === "sevenDays")
+  const thirtyDaysItems = historyList.filter(i => groupForDate(i.created_at) === "thirtyDays" || groupForDate(i.created_at) === "older")
 
   return (
     <Sidebar collapsible="offcanvas" className="border-r border-sidebar-border select-none">
@@ -240,10 +210,33 @@ export function UserHistorySidebar({
         </SidebarMenu>
       </SidebarHeader>
 
-      {/* Main Content: Chronological Chat History */}
+      {/* Main Content: Chronological Chat History -- backend-driven only */}
       <SidebarContent className="px-2 scrollbar-thin">
-        {/* Today */}
-        {todayItems.length > 0 && (
+        {status === "loading" && (
+          <div className="px-3 py-4 text-xs text-sidebar-foreground/50">Loading history…</div>
+        )}
+
+        {status === "error" && (
+          <div className="px-3 py-4 flex flex-col items-start gap-2 text-xs text-sidebar-foreground/70">
+            <div className="flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+              <span>Unable to load analysis history.</span>
+            </div>
+            <button
+              onClick={fetchHistory}
+              className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry</span>
+            </button>
+          </div>
+        )}
+
+        {status === "ready" && historyList.length === 0 && (
+          <div className="px-3 py-4 text-xs text-sidebar-foreground/50">No analysis history yet.</div>
+        )}
+
+        {status === "ready" && todayItems.length > 0 && (
           <SidebarGroup className="py-1">
             <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
               Today
@@ -251,21 +244,15 @@ export function UserHistorySidebar({
             <SidebarGroupContent>
               <SidebarMenu>
                 {todayItems.map(item => (
-                  <SidebarMenuItem key={item.id}>
+                  <SidebarMenuItem key={item.job_id}>
                     <SidebarMenuButton
                       onClick={() => handleItemClick(item)}
-                      isActive={activeItemId === item.id && activeScreen === "workspace"}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg pr-7"
+                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
+                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
+                      tooltip={item.query}
                     >
-                      <span className="truncate">{item.title}</span>
+                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
                     </SidebarMenuButton>
-                    <SidebarMenuAction
-                      onClick={(e) => handleDeleteItem(e, item.id)}
-                      showOnHover
-                      title="Delete chat session"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 opacity-60 hover:opacity-100 hover:text-red-400" />
-                    </SidebarMenuAction>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -273,8 +260,7 @@ export function UserHistorySidebar({
           </SidebarGroup>
         )}
 
-        {/* Previous 7 Days */}
-        {sevenDaysItems.length > 0 && (
+        {status === "ready" && sevenDaysItems.length > 0 && (
           <SidebarGroup className="py-1">
             <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
               Previous 7 Days
@@ -282,21 +268,15 @@ export function UserHistorySidebar({
             <SidebarGroupContent>
               <SidebarMenu>
                 {sevenDaysItems.map(item => (
-                  <SidebarMenuItem key={item.id}>
+                  <SidebarMenuItem key={item.job_id}>
                     <SidebarMenuButton
                       onClick={() => handleItemClick(item)}
-                      isActive={activeItemId === item.id && (item.screenTarget ? activeScreen === item.screenTarget : activeScreen === "workspace")}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg pr-7"
+                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
+                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
+                      tooltip={item.query}
                     >
-                      <span className="truncate">{item.title}</span>
+                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
                     </SidebarMenuButton>
-                    <SidebarMenuAction
-                      onClick={(e) => handleDeleteItem(e, item.id)}
-                      showOnHover
-                      title="Delete chat session"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 opacity-60 hover:opacity-100 hover:text-red-400" />
-                    </SidebarMenuAction>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -304,8 +284,7 @@ export function UserHistorySidebar({
           </SidebarGroup>
         )}
 
-        {/* Previous 30 Days */}
-        {thirtyDaysItems.length > 0 && (
+        {status === "ready" && thirtyDaysItems.length > 0 && (
           <SidebarGroup className="py-1">
             <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
               Previous 30 Days
@@ -313,21 +292,15 @@ export function UserHistorySidebar({
             <SidebarGroupContent>
               <SidebarMenu>
                 {thirtyDaysItems.map(item => (
-                  <SidebarMenuItem key={item.id}>
+                  <SidebarMenuItem key={item.job_id}>
                     <SidebarMenuButton
                       onClick={() => handleItemClick(item)}
-                      isActive={activeItemId === item.id && (item.screenTarget ? activeScreen === item.screenTarget : activeScreen === "workspace")}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg pr-7"
+                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
+                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
+                      tooltip={item.query}
                     >
-                      <span className="truncate">{item.title}</span>
+                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
                     </SidebarMenuButton>
-                    <SidebarMenuAction
-                      onClick={(e) => handleDeleteItem(e, item.id)}
-                      showOnHover
-                      title="Delete chat session"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 opacity-60 hover:opacity-100 hover:text-red-400" />
-                    </SidebarMenuAction>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>

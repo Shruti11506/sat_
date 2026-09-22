@@ -30,5 +30,5 @@ class SupabaseError(ApiError):
 
 
 class StorageError(ApiError):
-    def __init__(self, message: str):
-        super().__init__(status_code=500, code="STORAGE_ERROR", message=message)
+    def __init__(self, message: str, code: str = "STORAGE_ERROR"):
+        super().__init__(status_code=500, code=code, message=message)

@@ -24,9 +24,15 @@ class AnalysisType(str, Enum):
 class AnalysisCreate(BaseModel):
     imagery_id: UUID
     analysis_type: AnalysisType
-    query: str | None = Field(default=None, max_length=2000)
+    # Not `min_length=1` here on purpose: a whitespace-only string would still
+    # pass that check. Emptiness is checked explicitly in analysis_service so
+    # it raises the documented INVALID_QUERY error instead of a generic 422.
+    query: str = Field(..., max_length=2000)
 
 
 class AnalysisCreateResponse(BaseModel):
     job_id: UUID
+    imagery_id: UUID
+    analysis_type: AnalysisType
+    query: str
     status: str = "queued"

@@ -1,6 +1,9 @@
 -- SatQuery AI backend foundation schema.
 -- Run this once in the Supabase SQL editor (or via `supabase db push` if you
 -- adopt the Supabase CLI later) against the project referenced in .env.
+-- For a project that already ran an earlier version of this file (with a
+-- `file_path` column instead of `storage_path`/`bucket`/etc.), run
+-- migrations/0002_imagery_upload_fields.sql instead of this file.
 --
 -- No AI/model tables or columns are defined here -- see CLAUDE.md.
 
@@ -12,7 +15,11 @@ create table if not exists imagery (
     source text,
     sensor text,
     acquisition_date timestamptz,
-    file_path text,
+    original_filename text,
+    bucket text,
+    storage_path text,
+    mime_type text,
+    file_size bigint,
     storage_url text,
     cloud_cover float,
     latitude float,

@@ -14,9 +14,17 @@ Existing SatQuery UI → FastAPI → Supabase → stored metadata / analysis req
 
 ## 2. Existing frontend integration
 
-The frontend (repo root, outside `backend/`) is a Vite + React app — see the root [`CLAUDE.md`](../CLAUDE.md) for its architecture. It previously had no API layer at all; every "AI analysis" in `Workspace.jsx` is keyword-matched mock data.
+The frontend (repo root, outside `backend/`) is a Vite + React app — see the root [`CLAUDE.md`](../CLAUDE.md) for its architecture. It is now **fully backend-driven** for the upload → query → history flow: no hardcoded chat history, no fabricated AI analysis text, no "Sample Demo" fake scenario.
 
-This milestone adds one new frontend file, [`src/lib/apiClient.ts`](../src/lib/apiClient.ts) — a typed `fetch` wrapper for every endpoint below. **It is not wired into any screen yet.** Wiring the chat UI to real backend calls is deferred until an AI layer exists to actually answer queries; doing it now would mean replacing the existing mock analysis text with permanently-empty `queued` jobs, which is a worse user experience than the current demo. No existing component, route, or styling was changed.
+[`src/lib/apiClient.ts`](../src/lib/apiClient.ts) is a typed `fetch` wrapper for every endpoint below.
+
+- [`LandingHero.jsx`](../src/components/LandingHero.jsx)'s `processFile()` uploads the selected file via `/imagery/upload` during its existing "Parsing GeoTIFF Metadata..." loading state. The old "Sample Demo (Bengaluru 0.28m)" button was removed — it only ever produced a fabricated scenario with no real backend record.
+- [`App.jsx`](../src/App.jsx)'s `handleStartAnalysis` awaits the real `submitAnalysis()` call before rendering the Workspace, so the chat shows a neutral **"Analysis request submitted." / status: queued** acknowledgment — never a fabricated NDWI/NDVI/SAR paragraph. If no image was attached (or its upload failed), it shows an honest notice instead of silently falling back to demo content.
+- [`Workspace.jsx`](../src/components/Workspace.jsx) does the same for a mid-chat attachment + query. Its old `generateAgentResponse()` keyword-matcher (fake NDWI/NDVI/SAR responses) and the "report"/"compare" fake-redirect branches were removed entirely.
+- [`UserHistorySidebar.tsx`](../src/components/UserHistorySidebar.tsx) fetches `GET /api/v1/analysis/history` on mount and whenever a new request is submitted. No hardcoded `INITIAL_HISTORY` array remains — empty backend data renders "No analysis history yet.", a failed fetch renders "Unable to load analysis history." with a Retry button, and neither ever falls back to sample data.
+- Page-refresh persistence: `localStorage` holds only a pointer (`satquery-last-imagery-id`), never the data itself — on mount, `App.jsx` re-fetches that imagery + its history fresh from the backend and reconstructs the chat from real records. A stale/deleted pointer is cleared, never used to show fake data.
+
+The five pre-existing demo screens (`ChangeDetection`, `FusionViewer`, `AgentPipeline`, `AnalyticsDashboard`, `ReportScreen`, all reachable via the "Compare"/"Full Report" buttons and sidebar shortcuts) are **out of scope** for this milestone and still render entirely from `SATELLITE_SCENARIOS` mock data — see "Current limitations" below.
 
 To point the frontend at a running backend, copy the root `.env.example` to `.env` and set `VITE_API_BASE_URL` (defaults to `http://localhost:8000/api/v1`).
 
@@ -57,7 +65,9 @@ backend/
 │   ├── db/supabase.py       # single place the Supabase client is constructed
 │   └── core/                # config (env vars), logging, security (UUID validation), exceptions
 ├── tests/                   # pytest suite, uses an in-memory fake Supabase client
-├── supabase/schema.sql      # DDL for all 5 tables — run this in the Supabase SQL editor
+├── supabase/
+│   ├── schema.sql                          # DDL for all 5 tables (new projects)
+│   └── migrations/0002_imagery_upload_fields.sql  # upgrades an existing imagery table
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -91,11 +101,13 @@ uvicorn app.main:app --reload --port 8000
 
 ## 8. Database schema
 
-Run [`supabase/schema.sql`](supabase/schema.sql) once, in the Supabase SQL editor (Project → SQL Editor → New query → paste → Run). It creates:
+**New project**: run [`supabase/schema.sql`](supabase/schema.sql) once, in the Supabase SQL editor (Project → SQL Editor → New query → paste → Run).
+
+**Existing project** (already ran an earlier version of `schema.sql` with a `file_path` column instead of `storage_path`/`bucket`/`mime_type`/`file_size`/`original_filename`): run [`supabase/migrations/0002_imagery_upload_fields.sql`](supabase/migrations/0002_imagery_upload_fields.sql) instead. It renames `file_path` → `storage_path` and adds the new columns — safe on an empty table, additive otherwise, never deletes data.
 
 | Table | Purpose |
 |---|---|
-| `imagery` | Registered satellite scene metadata |
+| `imagery` | Registered satellite scene metadata + Storage location (`bucket`, `storage_path`, `mime_type`, `file_size`, `original_filename`) |
 | `analysis_jobs` | An analysis *request* — status stays `queued` until a future AI layer processes it |
 | `analysis_results` | Stored results (retrieval only — this API never writes AI answers) |
 | `evidence` | Stored evidence records tied to a result (retrieval only) |
@@ -103,17 +115,21 @@ Run [`supabase/schema.sql`](supabase/schema.sql) once, in the Supabase SQL edito
 
 ## 9. Storage setup
 
-Create a bucket named `satquery-data` in the Supabase dashboard (**Storage → New bucket**), or run the commented `insert into storage.buckets ...` statement at the bottom of `schema.sql`. Conceptual folder layout inside the bucket (see `app/services/storage_service.py`):
+Uses the **existing** `Satquery` bucket (private) — the backend never creates a bucket. Confirmed via `client.storage.list_buckets()` against the live project: `Satquery` is the only bucket, `public: false`. Set `SUPABASE_STORAGE_BUCKET` in `.env` if your bucket is named differently.
+
+Conceptual folder layout inside the bucket (see `app/services/storage_service.py`), enforced by `build_storage_path()`:
 
 ```
-satquery-data/
-  imagery/
+Satquery/
+  imagery/{uuid}/{original filename}
   results/
   evidence/
   exports/
 ```
 
-This milestone only registers/resolves storage *paths* as imagery metadata (`file_path`, `storage_url`) — it does not implement file upload or GeoTIFF processing.
+The `{uuid}` per upload prevents filename collisions and guarantees one user's upload never overwrites another's.
+
+Since the bucket is **private**, `GET /api/v1/imagery/{id}` resolves a fresh **signed URL** (1 hour TTL) rather than a public URL — see `storage_service.resolve_url()`, which checks `get_bucket().public` and switches to a public URL automatically if the bucket's privacy is ever changed. The bucket itself is never made public by this backend.
 
 ### Row Level Security
 
@@ -128,39 +144,46 @@ Most responses use one envelope:
 { "success": false, "data": null, "error": { "code": "IMAGE_NOT_FOUND", "message": "..." } }
 ```
 
-The two connectivity checks below are the exception — they put status in `data` on both success *and* failure, so a caller can render "disconnected" without special-casing:
+The `/health/*` connectivity checks are the exception — they put status in `data` on both success *and* failure, so a caller can render "disconnected" without special-casing:
 
 ```json
-{ "success": true, "data": { "status": "connected", "provider": "supabase" }, "error": null }
-{ "success": false, "data": { "status": "disconnected" }, "error": { "code": "SUPABASE_CONNECTION_ERROR", "message": "Unable to connect to Supabase." } }
+{ "success": true, "data": { "supabase": "connected", "database": "connected", "storage": "connected", "bucket": "Satquery" }, "error": null }
+{ "success": false, "data": { "supabase": "degraded", "database": "connected", "storage": "disconnected", "bucket": "Satquery" }, "error": { "code": "SUPABASE_STORAGE_ERROR", "message": "Unable to access the Supabase Storage bucket 'Satquery'." } }
 ```
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/v1/health` | Liveness check |
-| GET | `/api/v1/health/supabase` | Verifies backend ↔ Supabase Postgres connectivity (runs a real query, not just a URL check) |
-| GET | `/api/v1/health/storage` | Verifies backend ↔ Supabase Storage connectivity (lists the `satquery-data` bucket) |
-| POST | `/api/v1/imagery` | Register imagery metadata |
-| GET | `/api/v1/imagery?page=1&page_size=20` | List imagery (paginated) |
-| GET | `/api/v1/imagery/{imagery_id}` | Get one imagery record |
-| DELETE | `/api/v1/imagery/{imagery_id}` | Unregister an imagery record |
-| POST | `/api/v1/analysis` | Create an analysis job (**no AI inference**) |
+| GET | `/api/v1/health/supabase` | Verifies the Supabase client, database, **and** the `Satquery` Storage bucket in one call |
+| GET | `/api/v1/health/storage` | Storage-only version of the same check |
+| POST | `/api/v1/imagery/upload` | **Real upload**: multipart file → Supabase Storage (`Satquery` bucket) → `imagery` row. Used by the frontend. |
+| POST | `/api/v1/imagery` | Register imagery metadata only (no file) — for a file already placed in Storage some other way |
+| GET | `/api/v1/imagery?page=1&page_size=20` | List imagery (paginated, from the database — never scans Storage) |
+| GET | `/api/v1/imagery/{imagery_id}` | Get one imagery record, with a freshly-resolved signed/public `url` |
+| DELETE | `/api/v1/imagery/{imagery_id}` | Deletes the DB record first, then the Storage object (see note below). |
+| POST | `/api/v1/analysis` | Create an analysis job (**no AI inference**) — validates `imagery_id` exists and `query` is non-empty |
+| GET | `/api/v1/analysis/history?limit=50` | `analysis_jobs` joined with `imagery`, most recent first — the sidebar's sole data source |
 | GET | `/api/v1/jobs/{job_id}` | Get job status |
 | GET | `/api/v1/results/{result_id}` | Get a stored result (404 if none exists yet) |
 | GET | `/api/v1/results/{result_id}/evidence` | Get stored evidence for a result |
 
-Example — register imagery, then create an analysis request:
+Error codes added by the upload flow: `UNSUPPORTED_FILE_TYPE`, `EMPTY_FILE`, `FILE_TOO_LARGE`, `MISSING_FILENAME`, `INVALID_METADATA` (422), `STORAGE_UPLOAD_FAILED` (500, upload itself failed — no DB record is created), `INVALID_QUERY` (422, empty/whitespace-only query on `/analysis`).
+
+Example — upload an image, then create an analysis request:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/imagery \
-  -H "Content-Type: application/json" \
-  -d '{"name":"sentinel_scene_001","source":"Sentinel-2","sensor":"MSI","file_path":"imagery/sample.tif"}'
-# → { "success": true, "data": { "id": "<uuid>", "name": "sentinel_scene_001", "status": "registered" }, "error": null }
+curl -X POST http://localhost:8000/api/v1/imagery/upload \
+  -F "file=@scene.jpg;type=image/jpeg" \
+  -F "name=Bengaluru scene" -F "source=Sentinel-2" -F "sensor=MSI"
+# → { "success": true, "data": { "id": "<uuid>", "name": "Bengaluru scene", "original_filename": "scene.jpg",
+#      "bucket": "Satquery", "storage_path": "imagery/<uuid>/scene.jpg", "mime_type": "image/jpeg",
+#      "file_size": 123456, "status": "registered" }, "error": null }
 
 curl -X POST http://localhost:8000/api/v1/analysis \
   -H "Content-Type: application/json" \
   -d '{"imagery_id":"<uuid>","analysis_type":"vqa","query":"What is visible in this image?"}'
-# → { "success": true, "data": { "job_id": "<uuid>", "status": "queued" }, "error": null }
+# → { "success": true, "data": { "job_id": "<uuid>", "imagery_id": "<uuid>", "analysis_type": "vqa",
+#      "query": "What is visible in this image?", "status": "queued" }, "error": null }
 ```
 
 Interactive docs: `http://localhost:8000/docs` (Swagger UI) and `http://localhost:8000/redoc`.
@@ -214,18 +237,27 @@ cd backend
 pytest -v
 ```
 
-Tests use an in-memory fake Supabase client (`tests/fakes.py`) so they run without a live Supabase project or network access. Coverage: health, Supabase health, imagery CRUD + pagination, invalid UUIDs, analysis creation (including invalid `analysis_type` and missing imagery), job retrieval, and result/evidence retrieval (including not-found cases).
+Tests use an in-memory fake Supabase client (`tests/fakes.py`, including a fake Storage bucket/object store) so they run without a live Supabase project or network access. Coverage: health (including database-down and bucket-missing cases), imagery CRUD + pagination, invalid UUIDs, real upload flow (`test_imagery_upload.py`: success, unsupported type, empty file, storage failure not creating a DB record, delete removing the Storage object, delete aborting when Storage delete fails), analysis creation (invalid `analysis_type`, missing imagery, empty/whitespace query), job retrieval, and result/evidence retrieval.
 
 ## 17. Frontend integration
 
-See section 2 above. `src/lib/apiClient.ts` is ready to import from any component once a future milestone needs to display real (non-mock) data — e.g. `registerImagery(...)`, `createAnalysis(imageryId, "vqa", query)`, `getJob(jobId)`.
+See section 2 above for what's wired. `src/lib/apiClient.ts` exports `uploadImagery()`, `submitAnalysis()`, `getImagery()`, `listImagery()`, `deleteImagery()`, `getAnalysisJob()`, `getAnalysisHistory()`, `getResult()`, `getEvidence()`.
+
+### Delete ordering (found via live testing against the real project)
+
+`DELETE /api/v1/imagery/{id}` deletes the **database row first**, then the Storage object — the reverse of a naive "storage then DB" order, and deliberately so. `imagery.id` has an incoming foreign key from `analysis_jobs.imagery_id`; deleting an image that still has a job referencing it fails with a Postgres FK violation (`23503`) unrelated to Storage. Discovered this live: deleting a test image that had an analysis job attached failed the DB delete, and had the Storage object already been removed first, the DB record would have been left pointing at a file that no longer existed. With DB-first ordering, a blocked delete leaves both sides untouched and consistent. The only remaining edge case — DB delete succeeds but the subsequent Storage delete fails — orphans the Storage object; there's no cross-system transaction to roll back with, so this is logged loudly server-side (`imagery_service.delete_imagery`) and returned as an error rather than silently swallowed.
+
+### History N+1 (found via live testing against the real project)
+
+`list_history()` originally called `imagery_service.get_imagery()` once per job to resolve `imagery_name` (an N+1 pattern). Under concurrent load in the browser (the sidebar and the page-refresh restore path both fetch history on mount at once), this fired enough rapid requests through the shared Supabase client to intermittently trip a Cloudflare-level `400 Bad Request` in front of Supabase's REST API — a real failure only visible under actual concurrent usage, not in unit tests against the fake client. Fixed by batching: one `imagery.select("id,name").in_("id", [...])` call for all distinct `imagery_id`s in the page, instead of one call per row.
 
 ## 18. Current limitations
 
 - No AI/model/agentic layer — `analysis_jobs` never progress past `status: "queued"`, and `/results` will 404 until something writes to `analysis_results` (nothing does yet).
 - No authentication/authorization layer.
-- No file upload endpoint or GeoTIFF processing — imagery registration is metadata-only.
 - `audit_logs` table exists in the schema but nothing writes to it yet.
+- Upload/analysis errors from the frontend are only logged to the browser console (`console.error`) — there's no toast/banner component in the existing design system to surface them visually without adding new UI, so none was added.
+- The pre-existing `ChangeDetection`, `FusionViewer`, `AgentPipeline`, `AnalyticsDashboard`, and `ReportScreen` components (reachable via the "Compare"/"Full Report" buttons and sidebar shortcuts) still render entirely from `SATELLITE_SCENARIOS` mock data — rebuilding them on real data would require either raster/change-detection analysis (explicitly out of scope) or removing them, and neither was requested by this milestone's endpoint list.
 - Docker build was written and reviewed but could not be verified on this machine (Docker was not installed in this environment) — verify `docker compose build && docker compose up` locally before relying on it.
 
 ## 19. Future AI integration point

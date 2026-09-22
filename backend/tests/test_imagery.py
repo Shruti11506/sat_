@@ -6,7 +6,7 @@ def _register_imagery(client, name="sentinel_scene_001"):
             "source": "Sentinel-2",
             "sensor": "MSI",
             "acquisition_date": "2026-09-20T10:30:00Z",
-            "file_path": "imagery/sample.tif",
+            "storage_path": "imagery/sample.tif",
         },
     )
 

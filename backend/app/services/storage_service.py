@@ -1,33 +1,186 @@
-"""Supabase Storage helpers.
+"""Supabase Storage helpers -- the only module that talks to `client.storage`.
 
-Scope for this milestone: register/resolve storage paths for the
-`satquery-data` bucket. Actual file upload and GeoTIFF processing are
-out of scope -- see CLAUDE.md.
+Scope: upload/delete objects in the existing `Satquery` bucket (see
+app/core/config.py) and resolve an accessible URL for an object, respecting
+whatever public/private configuration the bucket already has. This module
+never creates or modifies buckets.
 """
+import logging
+import uuid
+
 from app.core.config import get_settings
+from app.core.exceptions import StorageError, ValidationAppError
 
-# Conceptual folder layout inside the bucket, kept as constants so
-# services/routes reference one source of truth instead of raw strings.
-IMAGERY_PREFIX = "imagery/"
-RESULTS_PREFIX = "results/"
-EVIDENCE_PREFIX = "evidence/"
-EXPORTS_PREFIX = "exports/"
+logger = logging.getLogger(__name__)
+
+IMAGERY_PREFIX = "imagery"
+RESULTS_PREFIX = "results"
+EVIDENCE_PREFIX = "evidence"
+EXPORTS_PREFIX = "exports"
+
+# Preview-friendly image formats vs. remote-sensing raster formats -- both
+# accepted, kept separate only so callers/logs can tell which kind a file is.
+PREVIEW_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+RASTER_EXTENSIONS = {".tif", ".tiff"}
+ALLOWED_EXTENSIONS = PREVIEW_EXTENSIONS | RASTER_EXTENSIONS
+
+CONTENT_TYPE_BY_EXTENSION = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+}
+
+# Short-lived: only used to let the frontend display an already-uploaded
+# image, re-resolved on every GET rather than stored permanently.
+SIGNED_URL_TTL_SECONDS = 3600
 
 
-def build_storage_path(prefix: str, filename: str) -> str:
-    return f"{prefix.rstrip('/')}/{filename.lstrip('/')}"
+def get_extension(filename: str) -> str:
+    if "." not in filename:
+        return ""
+    return "." + filename.rsplit(".", 1)[-1].lower()
 
 
-def get_public_url(client, file_path: str) -> str | None:
-    """Resolve a public URL for a file already stored in the bucket.
+def validate_upload(filename: str, content_type: str | None, size: int) -> str:
+    """Validate an incoming upload; returns the resolved content type or raises."""
+    if not filename or not filename.strip():
+        raise ValidationAppError("MISSING_FILENAME", "The uploaded file must have a filename.")
 
-    Returns None if the file_path is empty -- callers should treat storage_url
-    as optional metadata, not a guarantee the object exists.
+    extension = get_extension(filename)
+    if extension not in ALLOWED_EXTENSIONS:
+        raise ValidationAppError(
+            "UNSUPPORTED_FILE_TYPE",
+            "Supported formats are JPG, JPEG, PNG, WEBP, TIF and TIFF.",
+        )
+
+    settings = get_settings()
+    if size <= 0:
+        raise ValidationAppError("EMPTY_FILE", "The uploaded file is empty.")
+    if size > settings.max_upload_size_bytes:
+        raise ValidationAppError(
+            "FILE_TOO_LARGE",
+            f"File exceeds the {settings.MAX_UPLOAD_SIZE_MB} MB upload limit.",
+        )
+
+    resolved_content_type = CONTENT_TYPE_BY_EXTENSION[extension]
+    if content_type and content_type not in ("application/octet-stream", ""):
+        # Trust the extension over a generic/mismatched browser content-type,
+        # but keep whatever specific type the client sent if it's plausible.
+        if content_type.startswith("image/"):
+            resolved_content_type = content_type
+
+    return resolved_content_type
+
+
+def build_storage_path(filename: str, prefix: str = IMAGERY_PREFIX) -> str:
+    unique_id = str(uuid.uuid4())
+    safe_filename = filename.strip().replace("/", "_")
+    return f"{prefix}/{unique_id}/{safe_filename}"
+
+
+def upload_file(client, storage_path: str, content: bytes, content_type: str) -> None:
+    """Upload bytes to the configured bucket. Raises StorageError on any failure."""
+    settings = get_settings()
+    bucket = settings.SUPABASE_STORAGE_BUCKET
+
+    logger.info(
+        "Uploading to Supabase Storage: bucket=%s path=%s size=%d content_type=%s",
+        bucket,
+        storage_path,
+        len(content),
+        content_type,
+    )
+
+    try:
+        result = client.storage.from_(bucket).upload(
+            storage_path,
+            content,
+            {"content-type": content_type},
+        )
+    except Exception as exc:  # noqa: BLE001 - translate any client/network failure
+        logger.exception("Supabase Storage upload raised for %s/%s", bucket, storage_path)
+
+        # Our own pre-check in validate_upload() already rejects anything over
+        # MAX_UPLOAD_SIZE_MB before this point, but if the project's actual
+        # Supabase-side limit is *lower* than our configured value (e.g. our
+        # setting is stale), Supabase itself will reject the upload -- surface
+        # that distinctly as FILE_TOO_LARGE instead of a generic failure.
+        status = str(getattr(exc, "status", "")).lower()
+        message = str(getattr(exc, "message", "")).lower()
+        if "413" in status or "exceeded" in message or "maximum allowed size" in message or "too large" in message:
+            # Same FILE_TOO_LARGE code as the pre-upload size check in
+            # validate_upload() -- same 422, regardless of which layer caught
+            # it, so callers don't need to special-case where it came from.
+            raise ValidationAppError(
+                "FILE_TOO_LARGE",
+                f"File exceeds Supabase's configured upload limit ({settings.MAX_UPLOAD_SIZE_MB} MB or less).",
+            ) from exc
+
+        raise StorageError(
+            "Failed to upload the image to Supabase Storage.", code="STORAGE_UPLOAD_FAILED"
+        ) from exc
+
+    # supabase-py raises on HTTP error responses, but double-check for the
+    # dict-shaped error some client versions return instead of raising.
+    if isinstance(result, dict) and result.get("error"):
+        logger.error("Supabase Storage upload returned an error: %s", result["error"])
+        raise StorageError(
+            "Failed to upload the image to Supabase Storage.", code="STORAGE_UPLOAD_FAILED"
+        )
+
+    logger.info("Upload succeeded: bucket=%s path=%s", bucket, storage_path)
+
+
+def delete_file(client, storage_path: str) -> None:
+    """Delete an object from the configured bucket. Raises StorageError on failure."""
+    settings = get_settings()
+    bucket = settings.SUPABASE_STORAGE_BUCKET
+
+    try:
+        result = client.storage.from_(bucket).remove([storage_path])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Supabase Storage delete raised for %s/%s", bucket, storage_path)
+        raise StorageError("Failed to delete the image from Supabase Storage.") from exc
+
+    if isinstance(result, dict) and result.get("error"):
+        logger.error("Supabase Storage delete returned an error: %s", result["error"])
+        raise StorageError("Failed to delete the image from Supabase Storage.")
+
+    logger.info("Delete succeeded: bucket=%s path=%s", bucket, storage_path)
+
+
+def is_bucket_public(client) -> bool:
+    settings = get_settings()
+    bucket_info = client.storage.get_bucket(settings.SUPABASE_STORAGE_BUCKET)
+    if isinstance(bucket_info, dict):
+        return bool(bucket_info.get("public"))
+    return bool(getattr(bucket_info, "public", False))
+
+
+def resolve_url(client, storage_path: str | None) -> str | None:
+    """Resolve an accessible URL for an object, respecting bucket privacy.
+
+    Returns None if storage_path is empty or resolution fails -- callers
+    should treat this as optional, not a guarantee the object is reachable.
     """
-    if not file_path:
+    if not storage_path:
         return None
 
     settings = get_settings()
     bucket = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET)
-    result = bucket.get_public_url(file_path)
-    return result if isinstance(result, str) else result.get("publicUrl") if result else None
+
+    try:
+        if is_bucket_public(client):
+            result = bucket.get_public_url(storage_path)
+            return result if isinstance(result, str) else result.get("publicUrl") if result else None
+
+        result = bucket.create_signed_url(storage_path, SIGNED_URL_TTL_SECONDS)
+        if isinstance(result, dict):
+            return result.get("signedURL") or result.get("signed_url")
+        return getattr(result, "signed_url", None)
+    except Exception:  # noqa: BLE001 - URL resolution is best-effort
+        logger.exception("Failed to resolve URL for %s/%s", bucket, storage_path)
+        return None

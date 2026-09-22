@@ -13,6 +13,64 @@ import { GradientBackground } from './components/ui/oceanic-shimmer';
 import { SATELLITE_SCENARIOS } from './data/mockData';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { UserHistorySidebar } from './components/UserHistorySidebar';
+import { getImagery, submitAnalysis, getAnalysisHistory } from './lib/apiClient';
+
+const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
+
+function formatTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return null;
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+// Builds the real, backend-driven "scenario" object Workspace/ImageViewer render.
+// Every field here traces back to an actual imagery/analysis_jobs record --
+// nothing is invented (see CLAUDE.md / backend README "no dummy data" scope).
+function buildWorkspaceScenario(imagery, historyItemsForImage = []) {
+  const chatHistory = [];
+  // Oldest first, matching a natural chat reading order.
+  [...historyItemsForImage].reverse().forEach((item) => {
+    const ts = formatTime(item.created_at);
+    chatHistory.push({
+      id: `usr-${item.job_id}`,
+      sender: 'user',
+      text: item.query,
+      timestamp: ts
+    });
+    chatHistory.push({
+      id: `ai-${item.job_id}`,
+      sender: 'ai',
+      text: 'Analysis request submitted.',
+      status: item.status,
+      jobId: item.job_id,
+      timestamp: ts,
+      evidenceThumb: imagery.url
+    });
+  });
+
+  return {
+    id: imagery.id,
+    title: imagery.name,
+    sensor: imagery.sensor || null,
+    resolution: formatFileSize(imagery.file_size),
+    opticalImg: imagery.url,
+    uploadedFile: {
+      name: imagery.original_filename || imagery.name,
+      size: formatFileSize(imagery.file_size),
+      sensor: imagery.sensor || null,
+      previewUrl: imagery.url,
+      imageryId: imagery.id
+    },
+    chatHistory
+  };
+}
 
 export function App() {
   // Theme state: dark (default presentation theme) or light (accessibility theme)
@@ -42,14 +100,56 @@ export function App() {
     }
   };
 
-  // Active satellite scenario
-  const [currentScenario, setCurrentScenario] = useState(SATELLITE_SCENARIOS[0]);
+  // Legacy mock scenario -- kept ONLY for the pre-existing Change/Fusion/Pipeline/
+  // Analytics/Report screens, which are out of scope for the backend-persistence
+  // milestone (no AI/raster analysis exists to drive them with real data yet).
+  // The primary upload -> query -> history flow below never reads from this.
+  const [currentScenario] = useState(SATELLITE_SCENARIOS[0]);
+
+  // Real, backend-driven state for the Workspace screen. Built exclusively
+  // from actual imagery/analysis_jobs records -- see buildWorkspaceScenario().
+  const [workspaceScenario, setWorkspaceScenario] = useState(null);
+  // Bumped whenever a new analysis request is submitted, so the sidebar
+  // (which owns its own fetch) knows to refetch GET /api/v1/analysis/history.
+  const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
 
   // Sync theme with HTML data-theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('satquery-theme', theme);
   }, [theme]);
+
+  // Page-refresh persistence: the backend database is the source of truth,
+  // not localStorage -- this only remembers WHICH imagery to re-fetch, then
+  // always re-fetches it (and its history) fresh from the API.
+  useEffect(() => {
+    let lastImageryId;
+    try {
+      lastImageryId = localStorage.getItem(LAST_IMAGERY_KEY);
+    } catch {
+      return;
+    }
+    if (!lastImageryId) return;
+
+    (async () => {
+      try {
+        const [imagery, history] = await Promise.all([
+          getImagery(lastImageryId),
+          getAnalysisHistory(200).catch(() => [])
+        ]);
+        const itemsForImage = history.filter(h => h.imagery_id === lastImageryId);
+        setWorkspaceScenario(buildWorkspaceScenario(imagery, itemsForImage));
+        setActiveScreen('workspace');
+      } catch (err) {
+        // Imagery no longer exists (deleted) or backend unreachable -- clear
+        // the stale pointer and fall back to the empty landing state, never
+        // to fake data.
+        console.error('[SatQuery] Could not restore last session:', err);
+        try { localStorage.removeItem(LAST_IMAGERY_KEY); } catch { /* ignore */ }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally runs once on mount only
+  }, []);
 
   const toggleTheme = () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
@@ -58,76 +158,120 @@ export function App() {
     setTheme(nextTheme);
   };
 
-  const handleStartAnalysis = (queryPrompt, imageAttachment) => {
-    const promptText = queryPrompt?.trim() || 'Analyze this satellite scene and extract critical land-cover structures';
-    const lowerPrompt = promptText.toLowerCase();
+  // Real upload -> real (optional) query flow. No AI response is ever
+  // fabricated: on success the UI shows a neutral "queued" acknowledgment;
+  // on any failure it shows the actual error.
+  const handleStartAnalysis = async (queryPrompt, imageAttachment) => {
+    const promptText = queryPrompt?.trim() || '';
+    const imageryId = imageAttachment?.imageryId;
+    const nowTs = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Natural Language Query Redirection (e.g. "give me the report", "compare these both")
-    if (lowerPrompt.includes('report')) {
-      navigateToScreen('report');
-      return;
-    }
-    if (lowerPrompt.includes('compare') || lowerPrompt.includes('comparison') || lowerPrompt.includes('both')) {
-      navigateToScreen('change');
-      return;
-    }
-    
-    // Construct user message with the attached image (ChatGPT / Gemini style)
     const userMsg = {
       id: `usr-${Date.now()}`,
       sender: 'user',
-      text: promptText,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      attachment: imageAttachment || {
-        name: 'Cartosat3_Multispectral_Scene.tif',
-        size: '142.8 MB',
-        sensor: 'Cartosat-3 High-Res (0.28m GSD)',
-        previewUrl: currentScenario.opticalImg,
-        crs: 'EPSG:4326 (WGS84)'
+      text: promptText || (imageAttachment ? `Analyze attached satellite scene: ${imageAttachment.name}` : ''),
+      timestamp: nowTs(),
+      attachment: imageAttachment || null
+    };
+
+    if (!imageryId) {
+      // Either no image was ever attached, or its upload to the backend
+      // failed -- either way there is no real imagery_id to submit against.
+      setWorkspaceScenario({
+        id: null,
+        title: imageAttachment?.name || 'Untitled',
+        sensor: null,
+        resolution: null,
+        opticalImg: imageAttachment?.previewUrl || null,
+        uploadedFile: imageAttachment || null,
+        chatHistory: [
+          userMsg,
+          {
+            id: `ai-${Date.now()}`,
+            sender: 'ai',
+            text: imageAttachment
+              ? 'This image could not be uploaded to the backend, so no analysis request could be submitted. Please try attaching it again.'
+              : 'Please attach a satellite image before submitting a query -- an analysis request must reference an uploaded image.',
+            isError: true,
+            timestamp: nowTs()
+          }
+        ]
+      });
+      navigateToScreen('workspace');
+      return;
+    }
+
+    try {
+      localStorage.setItem(LAST_IMAGERY_KEY, imageryId);
+    } catch { /* refresh-persistence is a convenience, not required */ }
+
+    const chatHistory = [userMsg];
+
+    if (promptText) {
+      try {
+        const job = await submitAnalysis(imageryId, 'general_analysis', promptText);
+        chatHistory.push({
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: 'Analysis request submitted.',
+          status: job.status,
+          jobId: job.job_id,
+          timestamp: nowTs(),
+          evidenceThumb: imageAttachment.previewUrl
+        });
+        setHistoryRefreshToken(t => t + 1);
+      } catch (err) {
+        chatHistory.push({
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: `Failed to submit analysis request: ${err.message || 'unknown error'}`,
+          isError: true,
+          timestamp: nowTs()
+        });
       }
-    };
+    }
 
-    // AI response grounded on this image
-    const aiResponse = {
-      id: `ai-${Date.now()}`,
-      sender: 'ai',
-      text: `Multimodal Remote Sensing Analysis completed for **${userMsg.attachment.name}**.\n\n• **Sensor Calibration**: Verified ${userMsg.attachment.sensor} with 4-band reflectance.\n• **Water Body Extraction**: Identified primary reservoir with NDWI clarity index of **+0.54**.\n• **Vegetation & Canopy**: Healthy NDVI buffer confirmed (**+0.68**).\n• **Structure Detection**: 142 permanent buildings verified via SAR double-bounce radar backscatter.\n\nWhat specific spatial feature or zone would you like to inspect next?`,
-      confidence: 96.4,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      evidenceThumb: userMsg.attachment.previewUrl || currentScenario.opticalImg,
-      taskType: 'Vision-Language Feature Extraction',
-      modelChain: 'ISRO-GeoVision-LLaVA v3.2 + Prithvi-EO 100M',
-      executionSteps: currentScenario.chatHistory[1]?.executionSteps || []
-    };
-
-    setCurrentScenario(prev => ({
-      ...prev,
-      opticalImg: userMsg.attachment.previewUrl || prev.opticalImg,
-      uploadedFile: userMsg.attachment,
-      chatHistory: [userMsg, aiResponse]
-    }));
-
+    setWorkspaceScenario({
+      id: imageryId,
+      title: imageAttachment.name,
+      sensor: null,
+      resolution: imageAttachment.size || null,
+      opticalImg: imageAttachment.previewUrl,
+      uploadedFile: imageAttachment,
+      chatHistory
+    });
     navigateToScreen('workspace');
   };
 
-  const handleLoadDemo = () => {
-    setCurrentScenario(SATELLITE_SCENARIOS[0]);
-    navigateToScreen('workspace');
+  // Sidebar history item -> reload the real imagery + its real query/ack
+  // messages from the backend. Never fabricates a conversation.
+  const handleSelectHistoryItem = async (historyItem) => {
+    try {
+      const [imagery, history] = await Promise.all([
+        getImagery(historyItem.imagery_id),
+        getAnalysisHistory(200)
+      ]);
+      const itemsForImage = history.filter(h => h.imagery_id === historyItem.imagery_id);
+      setWorkspaceScenario(buildWorkspaceScenario(imagery, itemsForImage));
+      try {
+        localStorage.setItem(LAST_IMAGERY_KEY, historyItem.imagery_id);
+      } catch { /* ignore */ }
+      navigateToScreen('workspace');
+    } catch (err) {
+      console.error('[SatQuery] Could not load history item:', err);
+    }
   };
 
   return (
     <SidebarProvider defaultOpen={true}>
       {/* ChatGPT-Style User History Sidebar */}
-      <UserHistorySidebar 
+      <UserHistorySidebar
         onNewChat={() => navigateToScreen('landing')}
-        onSelectScenario={(scenarioId) => {
-          const found = SATELLITE_SCENARIOS.find(s => s.id === scenarioId) || SATELLITE_SCENARIOS[0];
-          setCurrentScenario(found);
-          navigateToScreen('workspace');
-        }}
+        onSelectHistoryItem={handleSelectHistoryItem}
         onNavigateScreen={navigateToScreen}
         activeScreen={activeScreen}
-        currentScenarioId={currentScenario.id}
+        activeImageryId={workspaceScenario?.id}
+        refreshToken={historyRefreshToken}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -217,18 +361,17 @@ export function App() {
           {/* Screen Routing with Step-by-Step Back Option */}
           <main style={{ flex: 1, position: 'relative', zIndex: 1 }}>
             {activeScreen === 'landing' && (
-              <LandingHero 
+              <LandingHero
                 onStartAnalysis={handleStartAnalysis}
-                onLoadDemo={handleLoadDemo}
-                currentScenario={currentScenario}
               />
             )}
 
-            {activeScreen === 'workspace' && (
-              <Workspace 
-                scenario={currentScenario}
+            {activeScreen === 'workspace' && workspaceScenario && (
+              <Workspace
+                scenario={workspaceScenario}
                 onNavigateScreen={navigateToScreen}
                 onGoBack={handleGoBack}
+                onAnalysisSubmitted={() => setHistoryRefreshToken(t => t + 1)}
               />
             )}
 
