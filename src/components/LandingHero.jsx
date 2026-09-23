@@ -7,7 +7,7 @@ import { ChitravitsEmblem } from './ui/ChitravitsLogo';
 import { SUGGESTED_QUERIES } from '../data/mockData';
 import { uploadImagery } from '../lib/apiClient';
 
-export function LandingHero({ onStartAnalysis }) {
+export function LandingHero({ onStartAnalysis, onStartConversation }) {
   const [prompt, setPrompt] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -52,26 +52,31 @@ export function LandingHero({ onStartAnalysis }) {
       previewUrl: previewUrl
     };
 
-    // Real upload to Supabase Storage (bucket: Satquery) via FastAPI. The
-    // existing "Parsing GeoTIFF Metadata..." loading state now covers this
-    // real network call instead of a fixed fake delay. If it fails, the
-    // demo flow still proceeds (imageryId stays null, same as before this
-    // upload existed) so a backend outage doesn't block the existing UI.
+    // Real upload to Supabase Storage (bucket: Satquery) via FastAPI, into a
+    // new conversation (titled "New Chat" -- the filename never becomes the
+    // title). The "Parsing GeoTIFF Metadata..." loading state covers this
+    // real network call. If it fails, imageryId stays null and the chat
+    // shows the honest upload error.
     try {
-      const result = await uploadImagery(file, { name: file.name });
+      const conversationId = await onStartConversation();
+      const result = await uploadImagery(file, { name: file.name, conversationId });
       console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
       filePayload.imageryId = result.id;
+      filePayload.conversationId = conversationId;
     } catch (err) {
       console.error('[SatQuery] Image upload to backend failed:', err);
     }
 
     setUploadedFile(filePayload);
     setIsValidating(false);
-    onStartAnalysis(prompt || 'Analyze this satellite scene and extract critical land-cover structures', filePayload);
+    // Only a query the user actually typed is submitted; an upload alone
+    // opens the chat and waits for the first question.
+    onStartAnalysis(prompt, filePayload);
   };
 
   const handleAnalyze = () => {
-    onStartAnalysis(prompt || 'Analyze this satellite scene and extract critical land-cover structures', uploadedFile);
+    if (!prompt.trim() && !uploadedFile) return;
+    onStartAnalysis(prompt, uploadedFile);
   };
 
   return (

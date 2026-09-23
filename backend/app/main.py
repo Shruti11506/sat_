@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import analysis, evidence, health, imagery, jobs, results
+from app.api.routes import analysis, conversations, evidence, health, imagery, jobs, results
 from app.core.config import get_settings
 from app.core.exceptions import ApiError
 from app.core.logging import configure_logging
@@ -32,6 +32,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,6 +67,7 @@ def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
 
 API_PREFIX = "/api/v1"
 app.include_router(health.router, prefix=API_PREFIX)
+app.include_router(conversations.router, prefix=API_PREFIX)
 app.include_router(imagery.router, prefix=API_PREFIX)
 app.include_router(analysis.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)

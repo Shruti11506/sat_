@@ -18,7 +18,9 @@ import {
   Sun,
   Moon,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Pencil,
+  Trash2
 } from "lucide-react"
 
 import {
@@ -30,32 +32,60 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarTrigger,
   useSidebar
 } from "@/components/ui/sidebar"
 import { ChitravitsEmblem } from "./ui/ChitravitsLogo"
-import { getAnalysisHistory, type HistoryItem as ApiHistoryItem } from "../lib/apiClient"
+import {
+  deleteConversation,
+  getAnalysisHistory,
+  listConversations,
+  renameConversation,
+  type Conversation,
+  type HistoryItem as ApiHistoryItem
+} from "../lib/apiClient"
 
 interface UserHistorySidebarProps {
   onNewChat: () => void
+  onSelectConversation: (conversation: Conversation) => void
   onSelectHistoryItem: (item: ApiHistoryItem) => void
+  onConversationRenamed?: (conversation: Conversation) => void
+  onConversationDeleted?: (conversationId: string) => void
   onNavigateScreen: (screenId: string) => void
   activeScreen: string
+  activeConversationId?: string | null
   activeImageryId?: string | null
   refreshToken?: number
   theme: string
   onToggleTheme: () => void
 }
 
-type DateGroup = "today" | "sevenDays" | "thirtyDays" | "older"
+// One sidebar row. Conversations carry their stored title; legacy entries
+// (requests made before conversations existed, one per image) are shown by
+// their first query -- never by the uploaded filename -- and are read-only.
+type SidebarEntry =
+  | { kind: "conversation"; key: string; title: string; at: string; conversation: Conversation }
+  | { kind: "legacy"; key: string; title: string; at: string; item: ApiHistoryItem }
+
+type DateGroup = "today" | "yesterday" | "sevenDays" | "thirtyDays" | "older"
+
+const GROUP_LABELS: Array<[DateGroup, string]> = [
+  ["today", "Today"],
+  ["yesterday", "Yesterday"],
+  ["sevenDays", "Previous 7 Days"],
+  ["thirtyDays", "Previous 30 Days"],
+  ["older", "Older"]
+]
 
 function groupForDate(iso: string): DateGroup {
-  const created = new Date(iso).getTime()
-  const now = Date.now()
-  const days = (now - created) / (1000 * 60 * 60 * 24)
-  if (days < 1) return "today"
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const days = Math.floor((startOfToday.getTime() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24)) + 1
+  if (days <= 0) return "today"
+  if (days === 1) return "yesterday"
   if (days < 7) return "sevenDays"
   if (days < 30) return "thirtyDays"
   return "older"
@@ -66,11 +96,165 @@ function truncate(text: string, max = 60): string {
   return text.length > max ? text.slice(0, max - 1) + "…" : text
 }
 
+function buildEntries(conversations: Conversation[], history: ApiHistoryItem[]): SidebarEntry[] {
+  const entries: SidebarEntry[] = conversations.map((conversation) => ({
+    kind: "conversation",
+    key: `c-${conversation.id}`,
+    title: conversation.title,
+    at: conversation.updated_at || conversation.created_at,
+    conversation
+  }))
+
+  // history is newest first, so the last item seen per image is its first query.
+  const legacyByImage = new Map<string, { latest: ApiHistoryItem; first: ApiHistoryItem }>()
+  history
+    .filter((item) => !item.conversation_id)
+    .forEach((item) => {
+      const existing = legacyByImage.get(item.imagery_id)
+      if (existing) existing.first = item
+      else legacyByImage.set(item.imagery_id, { latest: item, first: item })
+    })
+  legacyByImage.forEach(({ latest, first }, imageryId) => {
+    entries.push({
+      kind: "legacy",
+      key: `l-${imageryId}`,
+      title: truncate(first.query),
+      at: latest.created_at,
+      item: latest
+    })
+  })
+
+  return entries.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+}
+
+interface ConversationRowProps {
+  entry: SidebarEntry
+  isActive: boolean
+  isMenuOpen: boolean
+  onOpenMenu: (key: string | null) => void
+  onSelect: (entry: SidebarEntry) => void
+  onRename: (conversation: Conversation, title: string) => Promise<void>
+  onDelete: (conversation: Conversation) => Promise<void>
+}
+
+function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, onRename, onDelete }: ConversationRowProps) {
+  const [isEditing, setIsEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState(entry.title)
+  const menuRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (!isMenuOpen) return
+    const close = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) onOpenMenu(null)
+    }
+    document.addEventListener("mousedown", close)
+    return () => document.removeEventListener("mousedown", close)
+  }, [isMenuOpen, onOpenMenu])
+
+  const commitRename = async () => {
+    setIsEditing(false)
+    const title = draft.trim()
+    if (entry.kind !== "conversation" || !title || title === entry.title) return
+    await onRename(entry.conversation, title)
+  }
+
+  if (isEditing && entry.kind === "conversation") {
+    return (
+      <SidebarMenuItem>
+        <input
+          autoFocus
+          value={draft}
+          maxLength={120}
+          onChange={(e) => setDraft(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={commitRename}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur()
+            if (e.key === "Escape") {
+              setDraft(entry.title)
+              setIsEditing(false)
+            }
+          }}
+          aria-label="Conversation title"
+          className="w-full h-8.5 rounded-lg px-2 text-[0.88rem] bg-sidebar-accent text-sidebar-foreground outline-none ring-1 ring-blue-500/60"
+        />
+      </SidebarMenuItem>
+    )
+  }
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        onClick={() => onSelect(entry)}
+        isActive={isActive}
+        className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
+        tooltip={entry.title}
+      >
+        <span className="truncate">{entry.title}</span>
+      </SidebarMenuButton>
+
+      {entry.kind === "conversation" && (
+        <>
+          <SidebarMenuAction
+            showOnHover
+            className="top-2"
+            data-state={isMenuOpen ? "open" : "closed"}
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenMenu(isMenuOpen ? null : entry.key)
+            }}
+            title="Conversation options"
+            aria-label="Conversation options"
+          >
+            <MoreHorizontal />
+          </SidebarMenuAction>
+
+          {isMenuOpen && (
+            <div
+              ref={menuRef}
+              role="menu"
+              className="absolute right-1 top-9 z-50 min-w-32 rounded-lg border border-sidebar-border bg-sidebar p-1 shadow-lg"
+            >
+              <button
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground hover:bg-sidebar-accent"
+                onClick={() => {
+                  onOpenMenu(null)
+                  setDraft(entry.title)
+                  setIsEditing(true)
+                }}
+              >
+                <Pencil className="w-3.5 h-3.5" />
+                <span>Rename</span>
+              </button>
+              <button
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-red-400 hover:bg-sidebar-accent"
+                onClick={() => {
+                  onOpenMenu(null)
+                  onDelete(entry.conversation)
+                }}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete</span>
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </SidebarMenuItem>
+  )
+}
+
 export function UserHistorySidebar({
   onNewChat,
+  onSelectConversation,
   onSelectHistoryItem,
+  onConversationRenamed,
+  onConversationDeleted,
   onNavigateScreen,
   activeScreen,
+  activeConversationId,
   activeImageryId,
   refreshToken,
   theme,
@@ -78,21 +262,27 @@ export function UserHistorySidebar({
 }: UserHistorySidebarProps) {
   // Real backend data ONLY -- see CLAUDE.md / backend README. No hardcoded
   // entries, and a failed fetch never falls back to stale/sample data.
-  const [historyList, setHistoryList] = React.useState<ApiHistoryItem[]>([])
+  const [entries, setEntries] = React.useState<SidebarEntry[]>([])
   const [status, setStatus] = React.useState<"loading" | "ready" | "error">("loading")
+  const [openMenuKey, setOpenMenuKey] = React.useState<string | null>(null)
   const { isMobile, setOpenMobile } = useSidebar()
+  const hasLoadedRef = React.useRef(false)
 
   const fetchHistory = React.useCallback(() => {
-    setStatus("loading")
-    getAnalysisHistory(100)
-      .then((items) => {
-        setHistoryList(items)
+    // Only the very first load shows "Loading…"; refreshes (e.g. a title
+    // arriving) swap the list in place instead of flashing it away.
+    if (!hasLoadedRef.current) setStatus("loading")
+    Promise.all([listConversations(100), getAnalysisHistory(200)])
+      .then(([conversations, history]) => {
+        setEntries(buildEntries(conversations, history))
         setStatus("ready")
+        hasLoadedRef.current = true
       })
       .catch((err) => {
-        console.error("[SatQuery] Failed to load analysis history:", err)
-        setHistoryList([])
+        console.error("[SatQuery] Failed to load conversation history:", err)
+        setEntries([])
         setStatus("error")
+        hasLoadedRef.current = false
       })
   }, [])
 
@@ -100,16 +290,56 @@ export function UserHistorySidebar({
     fetchHistory()
   }, [fetchHistory, refreshToken])
 
-  const handleItemClick = (item: ApiHistoryItem) => {
-    onSelectHistoryItem(item)
+  const handleItemClick = (entry: SidebarEntry) => {
+    if (entry.kind === "conversation") onSelectConversation(entry.conversation)
+    else onSelectHistoryItem(entry.item)
     if (isMobile) {
       setOpenMobile(false)
     }
   }
 
-  const todayItems = historyList.filter(i => groupForDate(i.created_at) === "today")
-  const sevenDaysItems = historyList.filter(i => groupForDate(i.created_at) === "sevenDays")
-  const thirtyDaysItems = historyList.filter(i => groupForDate(i.created_at) === "thirtyDays" || groupForDate(i.created_at) === "older")
+  const handleRename = async (conversation: Conversation, title: string) => {
+    // Optimistic: show the new title immediately, reconcile with the server.
+    setEntries((prev) => prev.map((e) => (e.key === `c-${conversation.id}` ? { ...e, title } : e)))
+    try {
+      const updated = await renameConversation(conversation.id, title)
+      onConversationRenamed?.(updated)
+    } catch (err) {
+      console.error("[SatQuery] Failed to rename conversation:", err)
+      window.alert(`Could not rename conversation: ${(err as Error).message || "unknown error"}`)
+    }
+    fetchHistory()
+  }
+
+  const handleDelete = async (conversation: Conversation) => {
+    const ok = window.confirm(
+      `Delete "${conversation.title}"?\n\nThis permanently removes the conversation, its queries and its uploaded images.`
+    )
+    if (!ok) return
+    try {
+      await deleteConversation(conversation.id)
+      onConversationDeleted?.(conversation.id)
+    } catch (err) {
+      console.error("[SatQuery] Failed to delete conversation:", err)
+      window.alert(`Could not delete conversation: ${(err as Error).message || "unknown error"}`)
+    }
+    fetchHistory()
+  }
+
+  // A conversation is highlighted on the landing screen too: New Chat opens a
+  // real (still empty) conversation there, so the sidebar shows that record
+  // rather than a frontend-only placeholder.
+  const isEntryActive = (entry: SidebarEntry) =>
+    entry.kind === "conversation"
+      ? (activeScreen === "workspace" || activeScreen === "landing") &&
+        entry.conversation.id === activeConversationId
+      : activeScreen === "workspace" && !activeConversationId && entry.item.imagery_id === activeImageryId
+
+  const grouped = GROUP_LABELS.map(([group, label]) => ({
+    group,
+    label,
+    items: entries.filter((entry) => groupForDate(entry.at) === group)
+  }))
 
   return (
     <Sidebar collapsible="offcanvas" className="border-r border-sidebar-border select-none">
@@ -220,7 +450,7 @@ export function UserHistorySidebar({
           <div className="px-3 py-4 flex flex-col items-start gap-2 text-xs text-sidebar-foreground/70">
             <div className="flex items-center gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-              <span>Unable to load analysis history.</span>
+              <span>Unable to load conversation history.</span>
             </div>
             <button
               onClick={fetchHistory}
@@ -232,81 +462,36 @@ export function UserHistorySidebar({
           </div>
         )}
 
-        {status === "ready" && historyList.length === 0 && (
-          <div className="px-3 py-4 text-xs text-sidebar-foreground/50">No analysis history yet.</div>
+        {status === "ready" && entries.length === 0 && (
+          <div className="px-3 py-4 text-xs text-sidebar-foreground/50">No conversations yet.</div>
         )}
 
-        {status === "ready" && todayItems.length > 0 && (
-          <SidebarGroup className="py-1">
-            <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
-              Today
-            </SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {todayItems.map(item => (
-                  <SidebarMenuItem key={item.job_id}>
-                    <SidebarMenuButton
-                      onClick={() => handleItemClick(item)}
-                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
-                      tooltip={item.query}
-                    >
-                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
-
-        {status === "ready" && sevenDaysItems.length > 0 && (
-          <SidebarGroup className="py-1">
-            <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
-              Previous 7 Days
-            </SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {sevenDaysItems.map(item => (
-                  <SidebarMenuItem key={item.job_id}>
-                    <SidebarMenuButton
-                      onClick={() => handleItemClick(item)}
-                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
-                      tooltip={item.query}
-                    >
-                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
-
-        {status === "ready" && thirtyDaysItems.length > 0 && (
-          <SidebarGroup className="py-1">
-            <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
-              Previous 30 Days
-            </SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {thirtyDaysItems.map(item => (
-                  <SidebarMenuItem key={item.job_id}>
-                    <SidebarMenuButton
-                      onClick={() => handleItemClick(item)}
-                      isActive={activeImageryId === item.imagery_id && activeScreen === "workspace"}
-                      className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
-                      tooltip={item.query}
-                    >
-                      <span className="truncate">{truncate(item.imagery_name ? `${item.imagery_name}: ${item.query}` : item.query)}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
+        {status === "ready" && grouped.map(({ group, label, items }) => {
+          if (items.length === 0) return null
+          return (
+            <SidebarGroup key={group} className="py-1">
+              <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 px-2 py-1 tracking-wider uppercase">
+                {label}
+              </SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {items.map((entry) => (
+                    <ConversationRow
+                      key={entry.key}
+                      entry={entry}
+                      isActive={isEntryActive(entry)}
+                      isMenuOpen={openMenuKey === entry.key}
+                      onOpenMenu={setOpenMenuKey}
+                      onSelect={handleItemClick}
+                      onRename={handleRename}
+                      onDelete={handleDelete}
+                    />
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )
+        })}
       </SidebarContent>
 
       {/* Footer: ChatGPT-Style Settings, Plans, Help, and User Profile */}

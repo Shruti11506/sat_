@@ -18,7 +18,7 @@ const QUICK_SUGGESTIONS = [
 
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
 
-export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted }) {
+export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted, onEnsureConversation }) {
   const [messages, setMessages] = useState(scenario.chatHistory || []);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -28,10 +28,13 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
   const [activeEvidenceHighlight, setActiveEvidenceHighlight] = useState(null);
   const [pendingAttachment, setPendingAttachment] = useState(null);
   const [activeViewerImage, setActiveViewerImage] = useState(scenario.opticalImg);
-  // Real Supabase-backed imagery id for the currently-attached file (from
-  // POST /api/v1/imagery/upload), if any. The built-in demo scenarios have
-  // no real backend record, so this stays null for those.
+  // Real Supabase-backed imagery id the chat's queries run against: the most
+  // recent upload in this conversation. It persists across messages so
+  // follow-up questions ("now calculate the area") refer to the same image.
   const [backendImageryId, setBackendImageryId] = useState(null);
+  // Conversation this chat belongs to. null for legacy (pre-conversation)
+  // chats, and for a chat whose first upload failed (created on next attach).
+  const [conversationId, setConversationId] = useState(scenario.conversationId || null);
 
   const textareaRef = useRef(null);
   const chatBottomRef = useRef(null);
@@ -46,8 +49,10 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
       setActiveViewerImage(scenario.opticalImg);
     }
     // Carry over the real backend imagery_id if the scene arrived via a real
-    // upload (LandingHero). Built-in demo scenarios have none -> stays null.
+    // upload (LandingHero) or a restored conversation.
     setBackendImageryId(scenario.uploadedFile?.imageryId || null);
+    setConversationId(scenario.conversationId || null);
+    setPendingAttachment(null);
   }, [scenario]);
 
   // Give immediate control to the chat box when workspace mounts or scene updates
@@ -69,13 +74,14 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
   const handleSendMessage = (textToSend) => {
     const query = (textToSend !== undefined ? textToSend : inputText).trim();
     if (!query && !pendingAttachment) return;
+    if (pendingAttachment?.uploading) return;
 
     const attachmentPayload = pendingAttachment;
 
     const userMsg = {
       id: `usr-${Date.now()}`,
       sender: 'user',
-      text: query || (attachmentPayload ? `Analyze attached satellite scene: ${attachmentPayload.name}` : ''),
+      text: query,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       attachment: attachmentPayload || null
     };
@@ -89,8 +95,12 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
     setInputText('');
     setPendingAttachment(null);
 
-    const imageryIdForAnalysis = backendImageryId;
-    setBackendImageryId(null);
+    // A newly attached (and successfully uploaded) image becomes the chat's
+    // active image; otherwise the query targets the current one.
+    const imageryIdForAnalysis = attachmentPayload ? attachmentPayload.imageryId || null : backendImageryId;
+    if (attachmentPayload?.imageryId) {
+      setBackendImageryId(attachmentPayload.imageryId);
+    }
 
     setTimeout(() => {
       textareaRef.current?.focus();
@@ -100,19 +110,33 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
       // No real Supabase-backed image to reference -- backend requires a
       // valid imagery_id, so there is nothing honest to submit. No AI/fake
       // response is generated either way.
+      // An image on screen with no persisted imagery_id means its upload never
+      // reached the backend (e.g. backend not running) -- say that, rather than
+      // asking the user to attach an image they can already see.
+      const unsavedImageShown = !attachmentPayload && Boolean(activeViewerImage);
       const notice = {
         id: `ai-${Date.now()}`,
         sender: 'ai',
-        text: 'Please attach a satellite image before submitting a query -- an analysis request must reference an uploaded image.',
+        text: attachmentPayload
+          ? 'This image could not be uploaded to the backend, so no analysis request could be submitted. Please try attaching it again.'
+          : unsavedImageShown
+            ? 'The image shown was never saved to the backend (its upload failed -- check that the backend is running), so no analysis request was submitted. Re-attach the image to try again.'
+            : 'Please attach a satellite image before submitting a query -- an analysis request must reference an uploaded image.',
+        isError: Boolean(attachmentPayload) || unsavedImageShown,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
       setMessages(prev => [...prev, notice]);
       return;
     }
 
+    // Attaching an image without typing anything just adds it to the chat;
+    // no query is invented on the user's behalf.
+    if (!query) return;
+
     setIsTyping(true);
 
-    submitAnalysis(imageryIdForAnalysis, 'general_analysis', userMsg.text)
+    const conversationForQuery = conversationId;
+    submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery)
       .then((job) => {
         const ack = {
           id: `ai-${Date.now()}`,
@@ -124,7 +148,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
           evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage
         };
         setMessages(prev => [...prev, ack]);
-        onAnalysisSubmitted?.();
+        onAnalysisSubmitted?.(conversationForQuery);
       })
       .catch((err) => {
         const errorMsg = {
@@ -154,38 +178,55 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
       // sensor/crs are left unset -- a plain browser file upload carries no
       // real sensor or CRS metadata, and neither is fabricated (see section
       // 9: do not invent satellite/sensor/coordinate data).
+      const localId = `att-${Date.now()}`;
       const filePayload = {
+        localId,
         name: file.name,
         size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
-        previewUrl: previewUrl
+        previewUrl: previewUrl,
+        uploading: true
       };
 
       setPendingAttachment(filePayload);
       setActiveViewerImage(previewUrl);
-      setBackendImageryId(null);
 
       // Give control directly to the chat box!
       setTimeout(() => {
         textareaRef.current?.focus();
       }, 50);
 
+      const settle = (changes) =>
+        setPendingAttachment(prev => (prev?.localId === localId ? { ...prev, uploading: false, ...changes } : prev));
+
       // Real upload to Supabase Storage (bucket: Satquery) via FastAPI, in
-      // parallel with the local preview above. Non-blocking: the existing
-      // chat UX doesn't wait on this, it only unlocks the real analysis-job
-      // call below once an imagery_id comes back.
-      uploadImagery(file, { name: file.name })
-        .then((result) => {
-          console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
-          setBackendImageryId(result.id);
-          try {
-            localStorage.setItem(LAST_IMAGERY_KEY, result.id);
-          } catch {
-            // localStorage unavailable (private mode, etc.) -- refresh-persistence is a convenience, not required.
+      // parallel with the local preview above. It joins this chat's
+      // conversation (legacy chats have none) and never renames it. Sending
+      // waits until the upload settles so the query targets this image.
+      (async () => {
+        try {
+          let targetConversationId = conversationId;
+          if (!targetConversationId && !scenario.isLegacy && onEnsureConversation) {
+            targetConversationId = await onEnsureConversation();
+            setConversationId(targetConversationId);
           }
-        })
-        .catch((err) => {
+          const result = await uploadImagery(file, {
+            name: file.name,
+            conversationId: targetConversationId || undefined
+          });
+          console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
+          settle({ imageryId: result.id });
+          if (scenario.isLegacy) {
+            try {
+              localStorage.setItem(LAST_IMAGERY_KEY, result.id);
+            } catch {
+              // localStorage unavailable (private mode, etc.) -- refresh-persistence is a convenience, not required.
+            }
+          }
+        } catch (err) {
           console.error('[SatQuery] Image upload to backend failed:', err);
-        });
+          settle({ imageryId: null });
+        }
+      })();
     }
   };
 
@@ -543,7 +584,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
                 <button 
                   type="button" 
                   className="pending-remove-btn"
-                  onClick={() => { setPendingAttachment(null); setBackendImageryId(null); }}
+                  onClick={() => setPendingAttachment(null)}
                   title="Remove attached image"
                 >
                   <X size={14} />
@@ -603,7 +644,8 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
                 className="btn btn-primary"
                 style={{ padding: '8px 16px' }}
                 onClick={() => handleSendMessage()}
-                disabled={isTyping || (!inputText.trim() && !pendingAttachment)}
+                disabled={isTyping || pendingAttachment?.uploading || (!inputText.trim() && !pendingAttachment)}
+                title={pendingAttachment?.uploading ? 'Uploading image…' : undefined}
               >
                 <Send size={15} />
                 <span>Send</span>

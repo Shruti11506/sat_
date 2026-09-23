@@ -33,6 +33,20 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     @property
+    def cors_origin_regex(self) -> str | None:
+        """Development only: also allow a local frontend on ANY port.
+
+        `npm run dev` silently moves to 5174, 5175, ... when 5173 is taken, and
+        a browser origin missing from CORS_ORIGINS gets every API call blocked
+        at the preflight (400 "Disallowed CORS origin") -- which the sidebar
+        can only report as "Unable to load conversation history." Production
+        keeps the explicit CORS_ORIGINS list only.
+        """
+        if self.APP_ENV == "development":
+            return r"^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+        return None
+
+    @property
     def max_upload_size_bytes(self) -> int:
         return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 

@@ -45,6 +45,11 @@ class FakeQuery:
         self._op = "delete"
         return self
 
+    def update(self, changes):
+        self._op = "update"
+        self._changes = dict(changes)
+        return self
+
     def eq(self, col, val):
         self._filters.append((col, str(val)))
         return self
@@ -86,6 +91,12 @@ class FakeQuery:
                 table.append(new_row)
                 created.append(new_row)
             return FakeResponse(created)
+
+        if self._op == "update":
+            matches = [r for r in table if self._matches(r)]
+            for r in matches:
+                r.update(self._changes)
+            return FakeResponse([dict(r) for r in matches])
 
         if self._op == "delete":
             if self.client and self.table_name in self.client.fail_next_table_delete:

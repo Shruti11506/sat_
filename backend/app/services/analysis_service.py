@@ -7,7 +7,7 @@ layer to consume. See CLAUDE.md.
 """
 from app.core.exceptions import ValidationAppError
 from app.schemas.analysis import AnalysisCreate
-from app.services import imagery_service, job_service
+from app.services import conversation_service, imagery_service, job_service
 
 
 def create_analysis(payload: AnalysisCreate) -> dict:
@@ -17,8 +17,17 @@ def create_analysis(payload: AnalysisCreate) -> dict:
     # Raises NotFoundError(IMAGE_NOT_FOUND) if the imagery doesn't exist.
     imagery_service.get_imagery(str(payload.imagery_id))
 
-    return job_service.create_job(
+    conversation_id = str(payload.conversation_id) if payload.conversation_id else None
+    if conversation_id:
+        # Raises NotFoundError(CONVERSATION_NOT_FOUND) before any row is written.
+        conversation_service.get_conversation(conversation_id)
+
+    job = job_service.create_job(
         imagery_id=payload.imagery_id,
         analysis_type=payload.analysis_type,
         query=payload.query.strip(),
+        conversation_id=conversation_id,
     )
+    if conversation_id:
+        conversation_service.touch(conversation_id)
+    return job

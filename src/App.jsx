@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Plus, Sun, Moon, ArrowLeft } from 'lucide-react';
 import { ChitravitsEmblem } from './components/ui/ChitravitsLogo';
 import { LandingHero } from './components/LandingHero';
@@ -13,9 +13,26 @@ import { GradientBackground } from './components/ui/oceanic-shimmer';
 import { SATELLITE_SCENARIOS } from './data/mockData';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { UserHistorySidebar } from './components/UserHistorySidebar';
-import { getImagery, submitAnalysis, getAnalysisHistory } from './lib/apiClient';
+import {
+  getImagery,
+  submitAnalysis,
+  getAnalysisHistory,
+  createConversation,
+  getConversation,
+  generateConversationTitle
+} from './lib/apiClient';
 
+// Legacy pointer: chats created before conversations existed are keyed by imagery.
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
+// Pointer only (never data) to the open conversation, re-fetched on refresh.
+const LAST_CONVERSATION_KEY = 'satquery-last-conversation-id';
+
+function rememberPointer(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch { /* refresh-persistence is a convenience, not required */ }
+}
 
 function formatTime(iso) {
   try {
@@ -30,10 +47,74 @@ function formatFileSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
-// Builds the real, backend-driven "scenario" object Workspace/ImageViewer render.
-// Every field here traces back to an actual imagery/analysis_jobs record --
-// nothing is invented (see CLAUDE.md / backend README "no dummy data" scope).
-function buildWorkspaceScenario(imagery, historyItemsForImage = []) {
+function attachmentFromImagery(imagery) {
+  return {
+    name: imagery.original_filename || imagery.name,
+    size: formatFileSize(imagery.file_size),
+    sensor: imagery.sensor || null,
+    previewUrl: imagery.url,
+    imageryId: imagery.id
+  };
+}
+
+// A conversation New Chat created but nothing has been uploaded or asked in yet.
+function isEmptyConversation(detail) {
+  return !detail.imagery?.length && !detail.jobs?.length;
+}
+
+// Builds the Workspace "scenario" for a conversation from GET /conversations/{id}.
+// Uploads render as attachment bubbles and queries as user message + queued
+// acknowledgment, interleaved by their real created_at -- nothing is invented.
+function buildConversationScenario(detail) {
+  const events = [
+    ...detail.imagery.map((imagery) => ({ kind: 'imagery', at: imagery.created_at, imagery })),
+    ...detail.jobs.map((job) => ({ kind: 'job', at: job.created_at, job }))
+  ].sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  const chatHistory = [];
+  events.forEach((event) => {
+    const ts = formatTime(event.at);
+    if (event.kind === 'imagery') {
+      chatHistory.push({
+        id: `img-${event.imagery.id}`,
+        sender: 'user',
+        text: '',
+        timestamp: ts,
+        attachment: attachmentFromImagery(event.imagery)
+      });
+      return;
+    }
+    const { job } = event;
+    const imagery = detail.imagery.find(i => i.id === job.imagery_id);
+    chatHistory.push({ id: `usr-${job.id}`, sender: 'user', text: job.query, timestamp: ts });
+    chatHistory.push({
+      id: `ai-${job.id}`,
+      sender: 'ai',
+      text: 'Analysis request submitted.',
+      status: job.status,
+      jobId: job.id,
+      timestamp: ts,
+      evidenceThumb: imagery?.url || null
+    });
+  });
+
+  const latestImagery = detail.imagery[detail.imagery.length - 1] || null;
+  return {
+    id: latestImagery?.id || null,
+    conversationId: detail.id,
+    title: latestImagery ? latestImagery.name : 'Untitled',
+    sensor: latestImagery?.sensor || null,
+    resolution: latestImagery ? formatFileSize(latestImagery.file_size) : null,
+    opticalImg: latestImagery?.url || null,
+    uploadedFile: latestImagery ? attachmentFromImagery(latestImagery) : null,
+    chatHistory
+  };
+}
+
+// Builds the scenario for a LEGACY chat (made before conversations existed):
+// one imagery record plus its analysis_jobs. Every field traces back to a real
+// record -- nothing is invented (see CLAUDE.md "no dummy data" scope).
+function buildLegacyScenario(imagery, historyItemsForImage = []) {
   const chatHistory = [];
   // Oldest first, matching a natural chat reading order.
   [...historyItemsForImage].reverse().forEach((item) => {
@@ -57,17 +138,13 @@ function buildWorkspaceScenario(imagery, historyItemsForImage = []) {
 
   return {
     id: imagery.id,
+    conversationId: null,
+    isLegacy: true,
     title: imagery.name,
     sensor: imagery.sensor || null,
     resolution: formatFileSize(imagery.file_size),
     opticalImg: imagery.url,
-    uploadedFile: {
-      name: imagery.original_filename || imagery.name,
-      size: formatFileSize(imagery.file_size),
-      sensor: imagery.sensor || null,
-      previewUrl: imagery.url,
-      imageryId: imagery.id
-    },
+    uploadedFile: attachmentFromImagery(imagery),
     chatHistory
   };
 }
@@ -112,6 +189,102 @@ export function App() {
   // Bumped whenever a new analysis request is submitted, so the sidebar
   // (which owns its own fetch) knows to refetch GET /api/v1/analysis/history.
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
+  const bumpHistory = useCallback(() => setHistoryRefreshToken(t => t + 1), []);
+
+  // The open conversation ({ id, title, title_source }), or null for a fresh
+  // "New Chat" that has no backend record yet. It is created lazily on the
+  // first upload (see ensureConversation) and titled "New Chat" until the
+  // first meaningful query -- an uploaded filename never becomes its title.
+  const [activeConversation, setActiveConversation] = useState(null);
+  const activeConversationRef = useRef(null);
+  const pendingConversationRef = useRef(null);
+  // The conversation New Chat created (or an empty one that was reopened) and
+  // the ids an upload has since been started into. A conversation is "fresh"
+  // -- reusable by New Chat and the landing upload -- only while it's in the
+  // first and not the second. A Set rather than a flag, so the check doesn't
+  // depend on which awaiting caller resumes first.
+  const freshConversationIdRef = useRef(null);
+  const usedConversationIdsRef = useRef(new Set());
+
+  const openConversation = useCallback((conversation) => {
+    const value = conversation
+      ? { id: conversation.id, title: conversation.title, title_source: conversation.title_source }
+      : null;
+    activeConversationRef.current = value;
+    pendingConversationRef.current = null;
+    setActiveConversation(value);
+    rememberPointer(LAST_CONVERSATION_KEY, value?.id);
+  }, []);
+
+  // Returns the open conversation's id, creating it on first use. Concurrent
+  // callers share one in-flight request so a chat never gets two records.
+  const ensureConversation = useCallback(async () => {
+    if (activeConversationRef.current) return activeConversationRef.current.id;
+    if (!pendingConversationRef.current) {
+      const pending = createConversation().then((conversation) => {
+        if (pendingConversationRef.current === pending) {
+          openConversation(conversation);
+          bumpHistory();
+        }
+        return conversation.id;
+      });
+      pending.catch(() => {
+        if (pendingConversationRef.current === pending) pendingConversationRef.current = null;
+      });
+      pendingConversationRef.current = pending;
+    }
+    return pendingConversationRef.current;
+  }, [openConversation, bumpHistory]);
+
+  const isFreshConversation = useCallback((conversation) =>
+    Boolean(conversation)
+    && conversation.id === freshConversationIdRef.current
+    && !usedConversationIdsRef.current.has(conversation.id), []);
+
+  const markConversationUsed = useCallback((conversationId) => {
+    if (conversationId) usedConversationIdsRef.current.add(conversationId);
+    return conversationId;
+  }, []);
+
+  // Landing-screen upload. Reuses the conversation New Chat just created
+  // (still being created, or created but still empty) so one New Chat maps to
+  // exactly one conversation; otherwise -- e.g. landing reached via Back from
+  // a chat -- it begins a NEW conversation, as before.
+  const startConversation = useCallback(async () => {
+    if (pendingConversationRef.current) {
+      return markConversationUsed(await pendingConversationRef.current);
+    }
+    if (isFreshConversation(activeConversationRef.current)) {
+      return markConversationUsed(activeConversationRef.current.id);
+    }
+    openConversation(null);
+    return markConversationUsed(await ensureConversation());
+  }, [openConversation, ensureConversation, isFreshConversation, markConversationUsed]);
+
+  // Mid-chat upload with no conversation yet (Workspace).
+  const ensureConversationForUpload = useCallback(
+    async () => markConversationUsed(await ensureConversation()),
+    [ensureConversation, markConversationUsed]
+  );
+
+  // Called after every successfully submitted query. The title is generated
+  // in the background (never blocks the chat) and only while the chat is
+  // still "New Chat": the backend titles from the FIRST meaningful stored
+  // query and ignores later calls, so follow-ups and renames never overwrite it.
+  const handleQuerySubmitted = useCallback((conversationId) => {
+    bumpHistory();
+    if (!conversationId) return;
+    const current = activeConversationRef.current;
+    if (current?.id === conversationId && current.title_source !== 'default') return;
+    generateConversationTitle(conversationId)
+      .then((conversation) => {
+        if (activeConversationRef.current?.id === conversation.id) {
+          openConversation(conversation);
+        }
+        if (conversation.title_source !== 'default') bumpHistory();
+      })
+      .catch((err) => console.error('[SatQuery] Could not generate conversation title:', err));
+  }, [bumpHistory, openConversation]);
 
   // Sync theme with HTML data-theme attribute
   useEffect(() => {
@@ -123,10 +296,33 @@ export function App() {
   // not localStorage -- this only remembers WHICH imagery to re-fetch, then
   // always re-fetches it (and its history) fresh from the API.
   useEffect(() => {
+    let lastConversationId;
     let lastImageryId;
     try {
+      lastConversationId = localStorage.getItem(LAST_CONVERSATION_KEY);
       lastImageryId = localStorage.getItem(LAST_IMAGERY_KEY);
     } catch {
+      return;
+    }
+
+    if (lastConversationId) {
+      (async () => {
+        try {
+          const detail = await getConversation(lastConversationId);
+          openConversation(detail);
+          if (isEmptyConversation(detail)) {
+            // An untouched New Chat: stay on the upload screen, and let the
+            // next upload go into this conversation instead of a new one.
+            freshConversationIdRef.current = detail.id;
+            return;
+          }
+          setWorkspaceScenario(buildConversationScenario(detail));
+          setActiveScreen('workspace');
+        } catch (err) {
+          console.error('[SatQuery] Could not restore last conversation:', err);
+          rememberPointer(LAST_CONVERSATION_KEY, null);
+        }
+      })();
       return;
     }
     if (!lastImageryId) return;
@@ -138,7 +334,7 @@ export function App() {
           getAnalysisHistory(200).catch(() => [])
         ]);
         const itemsForImage = history.filter(h => h.imagery_id === lastImageryId);
-        setWorkspaceScenario(buildWorkspaceScenario(imagery, itemsForImage));
+        setWorkspaceScenario(buildLegacyScenario(imagery, itemsForImage));
         setActiveScreen('workspace');
       } catch (err) {
         // Imagery no longer exists (deleted) or backend unreachable -- clear
@@ -160,16 +356,18 @@ export function App() {
 
   // Real upload -> real (optional) query flow. No AI response is ever
   // fabricated: on success the UI shows a neutral "queued" acknowledgment;
-  // on any failure it shows the actual error.
+  // on any failure it shows the actual error. An upload with no typed query
+  // submits nothing -- the chat stays "New Chat" until the user asks.
   const handleStartAnalysis = async (queryPrompt, imageAttachment) => {
     const promptText = queryPrompt?.trim() || '';
     const imageryId = imageAttachment?.imageryId;
+    const conversationId = imageAttachment?.conversationId || null;
     const nowTs = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const userMsg = {
       id: `usr-${Date.now()}`,
       sender: 'user',
-      text: promptText || (imageAttachment ? `Analyze attached satellite scene: ${imageAttachment.name}` : ''),
+      text: promptText,
       timestamp: nowTs(),
       attachment: imageAttachment || null
     };
@@ -179,6 +377,7 @@ export function App() {
       // failed -- either way there is no real imagery_id to submit against.
       setWorkspaceScenario({
         id: null,
+        conversationId: null,
         title: imageAttachment?.name || 'Untitled',
         sensor: null,
         resolution: null,
@@ -201,15 +400,13 @@ export function App() {
       return;
     }
 
-    try {
-      localStorage.setItem(LAST_IMAGERY_KEY, imageryId);
-    } catch { /* refresh-persistence is a convenience, not required */ }
+    rememberPointer(LAST_IMAGERY_KEY, null);
 
     const chatHistory = [userMsg];
 
     if (promptText) {
       try {
-        const job = await submitAnalysis(imageryId, 'general_analysis', promptText);
+        const job = await submitAnalysis(imageryId, 'general_analysis', promptText, conversationId);
         chatHistory.push({
           id: `ai-${Date.now()}`,
           sender: 'ai',
@@ -219,7 +416,7 @@ export function App() {
           timestamp: nowTs(),
           evidenceThumb: imageAttachment.previewUrl
         });
-        setHistoryRefreshToken(t => t + 1);
+        handleQuerySubmitted(conversationId);
       } catch (err) {
         chatHistory.push({
           id: `ai-${Date.now()}`,
@@ -233,6 +430,7 @@ export function App() {
 
     setWorkspaceScenario({
       id: imageryId,
+      conversationId,
       title: imageAttachment.name,
       sensor: null,
       resolution: imageAttachment.size || null,
@@ -243,8 +441,61 @@ export function App() {
     navigateToScreen('workspace');
   };
 
-  // Sidebar history item -> reload the real imagery + its real query/ack
-  // messages from the backend. Never fabricates a conversation.
+  // New Chat creates a real conversation record (POST /conversations), then
+  // opens it; ensureConversation refreshes the sidebar only once the insert
+  // has completed. Exactly one record per action: a click while one is being
+  // created, or while the open chat is still an untouched New Chat, reuses it
+  // instead of piling up blank conversations.
+  const handleNewChat = async () => {
+    rememberPointer(LAST_IMAGERY_KEY, null);
+    navigateToScreen('landing');
+    if (pendingConversationRef.current || isFreshConversation(activeConversationRef.current)) return;
+
+    openConversation(null);
+    try {
+      freshConversationIdRef.current = await ensureConversation();
+    } catch (err) {
+      // Nothing is faked: the chat stays unsaved, and the next upload retries
+      // the creation and reports the real error if it fails again.
+      console.error('[SatQuery] Could not create a new conversation:', err);
+    }
+  };
+
+  // Sidebar conversation -> reload its real uploads + queries from the backend.
+  const handleSelectConversation = async (conversation) => {
+    try {
+      const detail = await getConversation(conversation.id);
+      openConversation(detail);
+      rememberPointer(LAST_IMAGERY_KEY, null);
+      if (isEmptyConversation(detail)) {
+        // Nothing to show yet: open the upload screen for this conversation.
+        freshConversationIdRef.current = detail.id;
+        usedConversationIdsRef.current.delete(detail.id);
+        navigateToScreen('landing');
+        return;
+      }
+      setWorkspaceScenario(buildConversationScenario(detail));
+      navigateToScreen('workspace');
+    } catch (err) {
+      console.error('[SatQuery] Could not load conversation:', err);
+    }
+  };
+
+  const handleConversationRenamed = (conversation) => {
+    if (activeConversationRef.current?.id === conversation.id) openConversation(conversation);
+  };
+
+  const handleConversationDeleted = (conversationId) => {
+    if (activeConversationRef.current?.id === conversationId) {
+      openConversation(null);
+      setWorkspaceScenario(null);
+      setHistoryStack([]);
+      setActiveScreen('landing');
+    }
+  };
+
+  // Legacy sidebar item (pre-conversation history) -> reload the real imagery
+  // + its real query/ack messages from the backend. Never fabricates a chat.
   const handleSelectHistoryItem = async (historyItem) => {
     try {
       const [imagery, history] = await Promise.all([
@@ -252,10 +503,9 @@ export function App() {
         getAnalysisHistory(200)
       ]);
       const itemsForImage = history.filter(h => h.imagery_id === historyItem.imagery_id);
-      setWorkspaceScenario(buildWorkspaceScenario(imagery, itemsForImage));
-      try {
-        localStorage.setItem(LAST_IMAGERY_KEY, historyItem.imagery_id);
-      } catch { /* ignore */ }
+      openConversation(null);
+      setWorkspaceScenario(buildLegacyScenario(imagery, itemsForImage));
+      rememberPointer(LAST_IMAGERY_KEY, historyItem.imagery_id);
       navigateToScreen('workspace');
     } catch (err) {
       console.error('[SatQuery] Could not load history item:', err);
@@ -266,11 +516,15 @@ export function App() {
     <SidebarProvider defaultOpen={true}>
       {/* ChatGPT-Style User History Sidebar */}
       <UserHistorySidebar
-        onNewChat={() => navigateToScreen('landing')}
+        onNewChat={handleNewChat}
+        onSelectConversation={handleSelectConversation}
         onSelectHistoryItem={handleSelectHistoryItem}
+        onConversationRenamed={handleConversationRenamed}
+        onConversationDeleted={handleConversationDeleted}
         onNavigateScreen={navigateToScreen}
         activeScreen={activeScreen}
-        activeImageryId={workspaceScenario?.id}
+        activeConversationId={activeConversation?.id || null}
+        activeImageryId={workspaceScenario?.isLegacy ? workspaceScenario.id : null}
         refreshToken={historyRefreshToken}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -309,7 +563,7 @@ export function App() {
               <SidebarTrigger className="hover:bg-sidebar-accent rounded-lg p-1.5 transition-colors cursor-pointer" title="Toggle History Sidebar" />
               <div 
                 className="brand-section" 
-                onClick={() => navigateToScreen('landing')}
+                onClick={handleNewChat}
                 title="SatQuery AI"
                 style={{ cursor: 'pointer' }}
               >
@@ -338,7 +592,7 @@ export function App() {
                   <button 
                     className="btn btn-secondary"
                     style={{ padding: '6px 14px', fontSize: '0.82rem', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-                    onClick={() => navigateToScreen('landing')}
+                    onClick={handleNewChat}
                     title="Upload another satellite scene"
                   >
                     <Plus size={14} />
@@ -363,6 +617,7 @@ export function App() {
             {activeScreen === 'landing' && (
               <LandingHero
                 onStartAnalysis={handleStartAnalysis}
+                onStartConversation={startConversation}
               />
             )}
 
@@ -371,7 +626,8 @@ export function App() {
                 scenario={workspaceScenario}
                 onNavigateScreen={navigateToScreen}
                 onGoBack={handleGoBack}
-                onAnalysisSubmitted={() => setHistoryRefreshToken(t => t + 1)}
+                onEnsureConversation={ensureConversationForUpload}
+                onAnalysisSubmitted={handleQuerySubmitted}
               />
             )}
 

@@ -39,12 +39,14 @@ class ImageryUploadResponse(BaseModel):
     storage_path: str
     mime_type: str
     file_size: int
+    conversation_id: UUID | None = None
     status: str = "registered"
 
 
 class ImageryOut(BaseModel):
     id: UUID
     name: str
+    conversation_id: UUID | None = None
     source: str | None = None
     sensor: str | None = None
     acquisition_date: datetime | None = None

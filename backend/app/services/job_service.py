@@ -8,7 +8,7 @@ import logging
 from uuid import UUID
 
 from app.core.exceptions import NotFoundError, SupabaseError
-from app.db.supabase import get_supabase
+from app.db.supabase import execute_read, get_supabase
 from app.schemas.analysis import AnalysisType
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 TABLE = "analysis_jobs"
 
 
-def create_job(imagery_id: UUID, analysis_type: AnalysisType, query: str | None) -> dict:
+def create_job(
+    imagery_id: UUID,
+    analysis_type: AnalysisType,
+    query: str | None,
+    conversation_id: str | None = None,
+) -> dict:
     client = get_supabase()
     row = {
         "imagery_id": str(imagery_id),
@@ -24,6 +29,8 @@ def create_job(imagery_id: UUID, analysis_type: AnalysisType, query: str | None)
         "query": query,
         "status": "queued",
     }
+    if conversation_id:
+        row["conversation_id"] = conversation_id
 
     try:
         response = client.table(TABLE).insert(row).execute()
@@ -61,8 +68,8 @@ def list_history(limit: int = 50) -> list[dict]:
     client = get_supabase()
 
     try:
-        response = (
-            client.table(TABLE).select("*").order("created_at", desc=True).limit(limit).execute()
+        response = execute_read(
+            client.table(TABLE).select("*").order("created_at", desc=True).limit(limit)
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Supabase list failed for analysis_jobs history")
@@ -78,8 +85,8 @@ def list_history(limit: int = 50) -> list[dict]:
     names_by_id: dict[str, str] = {}
     if imagery_ids:
         try:
-            imagery_rows = (
-                client.table("imagery").select("id,name").in_("id", imagery_ids).execute()
+            imagery_rows = execute_read(
+                client.table("imagery").select("id,name").in_("id", imagery_ids)
             )
             names_by_id = {row["id"]: row["name"] for row in (imagery_rows.data or [])}
         except Exception:  # noqa: BLE001 - name enrichment is best-effort, never fails the whole list

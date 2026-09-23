@@ -21,8 +21,8 @@ The frontend (repo root, outside `backend/`) is a Vite + React app — see the r
 - [`LandingHero.jsx`](../src/components/LandingHero.jsx)'s `processFile()` uploads the selected file via `/imagery/upload` during its existing "Parsing GeoTIFF Metadata..." loading state. The old "Sample Demo (Bengaluru 0.28m)" button was removed — it only ever produced a fabricated scenario with no real backend record.
 - [`App.jsx`](../src/App.jsx)'s `handleStartAnalysis` awaits the real `submitAnalysis()` call before rendering the Workspace, so the chat shows a neutral **"Analysis request submitted." / status: queued** acknowledgment — never a fabricated NDWI/NDVI/SAR paragraph. If no image was attached (or its upload failed), it shows an honest notice instead of silently falling back to demo content.
 - [`Workspace.jsx`](../src/components/Workspace.jsx) does the same for a mid-chat attachment + query. Its old `generateAgentResponse()` keyword-matcher (fake NDWI/NDVI/SAR responses) and the "report"/"compare" fake-redirect branches were removed entirely.
-- [`UserHistorySidebar.tsx`](../src/components/UserHistorySidebar.tsx) fetches `GET /api/v1/analysis/history` on mount and whenever a new request is submitted. No hardcoded `INITIAL_HISTORY` array remains — empty backend data renders "No analysis history yet.", a failed fetch renders "Unable to load analysis history." with a Retry button, and neither ever falls back to sample data.
-- Page-refresh persistence: `localStorage` holds only a pointer (`satquery-last-imagery-id`), never the data itself — on mount, `App.jsx` re-fetches that imagery + its history fresh from the backend and reconstructs the chat from real records. A stale/deleted pointer is cleared, never used to show fake data.
+- [`UserHistorySidebar.tsx`](../src/components/UserHistorySidebar.tsx) lists **conversations** (`GET /api/v1/conversations`) plus legacy pre-conversation requests from `GET /api/v1/analysis/history`. A conversation is titled "New Chat" until its first meaningful query, then titled once from that query (never from an uploaded filename); users can rename or delete it from the hover menu. Empty data renders "No conversations yet.", a failed fetch renders "Unable to load conversation history." with a Retry button, and neither ever falls back to sample data.
+- Page-refresh persistence: `localStorage` holds only a pointer (`satquery-last-conversation-id`, or `satquery-last-imagery-id` for legacy chats), never the data itself — on mount, `App.jsx` re-fetches it fresh from the backend and reconstructs the chat from real records. A stale/deleted pointer is cleared, never used to show fake data.
 
 The five pre-existing demo screens (`ChangeDetection`, `FusionViewer`, `AgentPipeline`, `AnalyticsDashboard`, `ReportScreen`, all reachable via the "Compare"/"Full Report" buttons and sidebar shortcuts) are **out of scope** for this milestone and still render entirely from `SATELLITE_SCENARIOS` mock data — see "Current limitations" below.
 
@@ -156,18 +156,24 @@ The `/health/*` connectivity checks are the exception — they put status in `da
 | GET | `/api/v1/health` | Liveness check |
 | GET | `/api/v1/health/supabase` | Verifies the Supabase client, database, **and** the `Satquery` Storage bucket in one call |
 | GET | `/api/v1/health/storage` | Storage-only version of the same check |
-| POST | `/api/v1/imagery/upload` | **Real upload**: multipart file → Supabase Storage (`Satquery` bucket) → `imagery` row. Used by the frontend. |
+| POST | `/api/v1/conversations` | Create a conversation titled "New Chat" (`title_source: default`) |
+| GET | `/api/v1/conversations?limit=100` | List conversations, most recently active (`updated_at`) first — the sidebar's data source |
+| GET | `/api/v1/conversations/{id}` | Conversation + its `imagery` (with fresh `url`) and `jobs`, oldest first |
+| PATCH | `/api/v1/conversations/{id}` | Rename (`{"title"}`); sets `title_source: user`, never auto-overwritten |
+| POST | `/api/v1/conversations/{id}/title` | Title from the FIRST meaningful stored query (deterministic keywords, `services/title_service.py`, no AI). No-op once `auto`/`user` |
+| DELETE | `/api/v1/conversations/{id}` | Deletes its jobs, then each imagery (row + Storage object), then the conversation |
+| POST | `/api/v1/imagery/upload` | **Real upload**: multipart file → Supabase Storage (`Satquery` bucket) → `imagery` row. Optional form field `conversation_id`. Used by the frontend. |
 | POST | `/api/v1/imagery` | Register imagery metadata only (no file) — for a file already placed in Storage some other way |
 | GET | `/api/v1/imagery?page=1&page_size=20` | List imagery (paginated, from the database — never scans Storage) |
 | GET | `/api/v1/imagery/{imagery_id}` | Get one imagery record, with a freshly-resolved signed/public `url` |
 | DELETE | `/api/v1/imagery/{imagery_id}` | Deletes the DB record first, then the Storage object (see note below). |
-| POST | `/api/v1/analysis` | Create an analysis job (**no AI inference**) — validates `imagery_id` exists and `query` is non-empty |
+| POST | `/api/v1/analysis` | Create an analysis job (**no AI inference**) — validates `imagery_id` exists and `query` is non-empty; optional `conversation_id` |
 | GET | `/api/v1/analysis/history?limit=50` | `analysis_jobs` joined with `imagery`, most recent first — the sidebar's sole data source |
 | GET | `/api/v1/jobs/{job_id}` | Get job status |
 | GET | `/api/v1/results/{result_id}` | Get a stored result (404 if none exists yet) |
 | GET | `/api/v1/results/{result_id}/evidence` | Get stored evidence for a result |
 
-Error codes added by the upload flow: `UNSUPPORTED_FILE_TYPE`, `EMPTY_FILE`, `FILE_TOO_LARGE`, `MISSING_FILENAME`, `INVALID_METADATA` (422), `STORAGE_UPLOAD_FAILED` (500, upload itself failed — no DB record is created), `INVALID_QUERY` (422, empty/whitespace-only query on `/analysis`).
+Error codes added by the upload flow: `UNSUPPORTED_FILE_TYPE`, `EMPTY_FILE`, `FILE_TOO_LARGE`, `MISSING_FILENAME`, `INVALID_METADATA` (422), `STORAGE_UPLOAD_FAILED` (500, upload itself failed — no DB record is created), `INVALID_QUERY` (422, empty/whitespace-only query on `/analysis`). Conversations add `CONVERSATION_NOT_FOUND` (404) and `INVALID_TITLE` (422). The conversation endpoints need migration `supabase/migrations/0003_conversations.sql`.
 
 Example — upload an image, then create an analysis request:
 

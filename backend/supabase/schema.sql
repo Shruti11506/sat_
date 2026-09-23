@@ -3,14 +3,28 @@
 -- adopt the Supabase CLI later) against the project referenced in .env.
 -- For a project that already ran an earlier version of this file (with a
 -- `file_path` column instead of `storage_path`/`bucket`/etc.), run
--- migrations/0002_imagery_upload_fields.sql instead of this file.
+-- migrations/0002_imagery_upload_fields.sql and 0003_conversations.sql
+-- instead of this file.
 --
 -- No AI/model tables or columns are defined here -- see CLAUDE.md.
 
 create extension if not exists "pgcrypto";
 
+-- A chat thread. Its title never comes from an uploaded filename: it starts
+-- as 'New Chat' and is set once from the first meaningful query ('auto') or
+-- by a manual rename ('user').
+create table if not exists conversations (
+    id uuid primary key default gen_random_uuid(),
+    title text not null default 'New Chat',
+    title_source text not null default 'default'
+        check (title_source in ('default', 'auto', 'user')),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
 create table if not exists imagery (
     id uuid primary key default gen_random_uuid(),
+    conversation_id uuid references conversations(id),
     name text not null,
     source text,
     sensor text,
@@ -32,6 +46,7 @@ create table if not exists imagery (
 create table if not exists analysis_jobs (
     id uuid primary key default gen_random_uuid(),
     imagery_id uuid references imagery(id),
+    conversation_id uuid references conversations(id),
     analysis_type text not null,
     query text,
     status text not null default 'queued',

@@ -23,7 +23,7 @@ from app.schemas.imagery import (
     ImageryOut,
     ImageryUploadResponse,
 )
-from app.services import imagery_service, storage_service
+from app.services import conversation_service, imagery_service, storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,10 @@ async def upload_imagery(
     sensor: str | None = Form(default=None),
     acquisition_date: datetime | None = Form(default=None),
     metadata: str | None = Form(default=None, description="JSON object, as a string"),
+    conversation_id: UUID | None = Form(
+        default=None,
+        description="Conversation this upload belongs to. Never changes the conversation's title.",
+    ),
 ) -> ApiResponse[ImageryUploadResponse]:
     parsed_metadata = None
     if metadata:
@@ -63,6 +67,10 @@ async def upload_imagery(
             raise ValidationAppError("INVALID_METADATA", "metadata must be valid JSON.") from exc
         if not isinstance(parsed_metadata, dict):
             raise ValidationAppError("INVALID_METADATA", "metadata must be a JSON object.")
+
+    if conversation_id:
+        # Checked before touching Storage so a bad id can't orphan an uploaded file.
+        conversation_service.get_conversation(str(conversation_id))
 
     content = await file.read()
     resolved_content_type = storage_service.validate_upload(
@@ -94,7 +102,10 @@ async def upload_imagery(
         sensor=sensor,
         acquisition_date=acquisition_date,
         metadata=parsed_metadata,
+        conversation_id=str(conversation_id) if conversation_id else None,
     )
+    if conversation_id:
+        conversation_service.touch(str(conversation_id))
 
     return ApiResponse.ok(
         ImageryUploadResponse(
@@ -105,6 +116,7 @@ async def upload_imagery(
             storage_path=row["storage_path"],
             mime_type=row["mime_type"],
             file_size=row["file_size"],
+            conversation_id=row.get("conversation_id"),
         )
     )
 

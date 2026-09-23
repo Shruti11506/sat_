@@ -15,6 +15,8 @@ from app.schemas.jobs import JobStatus
 class HistoryItem(BaseModel):
     job_id: UUID
     imagery_id: UUID
+    # NULL for requests made before conversations existed (legacy history).
+    conversation_id: UUID | None = None
     imagery_name: str | None = None
     query: str
     analysis_type: AnalysisType

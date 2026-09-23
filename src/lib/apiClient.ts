@@ -1,12 +1,9 @@
 /**
- * Centralized client for the SatQuery FastAPI backend.
- *
- * uploadImagery() and submitAnalysis() are wired into Workspace.jsx: selecting
- * a file uploads it to Supabase Storage for real, and submitting a chat query
- * creates a real (queued) analysis_jobs row. The existing mock chat response
- * text is unchanged -- there is still no AI layer to answer with -- these
- * calls run alongside it so the upload/persistence pipeline is real underneath
- * the existing demo UI.
+ * Centralized client for the SatQuery FastAPI backend -- the only place the
+ * frontend talks to it. Uploads go to Supabase Storage, queries create real
+ * (queued) analysis_jobs rows, and both are grouped under a conversation,
+ * which is what the sidebar lists. There is no AI layer yet: nothing here
+ * returns or fabricates an analysis answer.
  */
 
 const API_BASE_URL =
@@ -102,6 +99,7 @@ export interface ImageryUploadResult {
 
 export interface ImageryRecord extends ImageryPayload {
   id: string;
+  conversation_id?: string | null;
   original_filename: string | null;
   mime_type: string | null;
   file_size: number | null;
@@ -119,6 +117,8 @@ export function uploadImagery(
     sensor?: string;
     acquisition_date?: string;
     metadata?: Record<string, unknown>;
+    /** Groups the upload under a conversation. Never changes its title. */
+    conversationId?: string;
   }
 ) {
   const form = new FormData();
@@ -128,6 +128,7 @@ export function uploadImagery(
   if (meta?.sensor) form.append("sensor", meta.sensor);
   if (meta?.acquisition_date) form.append("acquisition_date", meta.acquisition_date);
   if (meta?.metadata) form.append("metadata", JSON.stringify(meta.metadata));
+  if (meta?.conversationId) form.append("conversation_id", meta.conversationId);
 
   return request<ImageryUploadResult>("/imagery/upload", {
     method: "POST",
@@ -176,14 +177,25 @@ export interface AnalysisCreateResult {
   imagery_id: string;
   analysis_type: AnalysisType;
   query: string;
+  conversation_id: string | null;
   status: string;
 }
 
 /** Records an analysis request (analysis_jobs, status "queued"). Performs NO AI inference. */
-export function submitAnalysis(imageryId: string, analysisType: AnalysisType, query: string) {
+export function submitAnalysis(
+  imageryId: string,
+  analysisType: AnalysisType,
+  query: string,
+  conversationId?: string | null
+) {
   return request<AnalysisCreateResult>("/analysis", {
     method: "POST",
-    body: JSON.stringify({ imagery_id: imageryId, analysis_type: analysisType, query }),
+    body: JSON.stringify({
+      imagery_id: imageryId,
+      analysis_type: analysisType,
+      query,
+      conversation_id: conversationId || null,
+    }),
   });
 }
 
@@ -193,6 +205,8 @@ export const createAnalysis = submitAnalysis;
 export interface HistoryItem {
   job_id: string;
   imagery_id: string;
+  /** null for requests made before conversations existed (legacy history). */
+  conversation_id: string | null;
   imagery_name: string | null;
   query: string;
   analysis_type: AnalysisType;
@@ -203,6 +217,73 @@ export interface HistoryItem {
 /** analysis_jobs joined with imagery, most recent first. Retrieval only -- the sidebar's sole data source. */
 export function getAnalysisHistory(limit = 50) {
   return request<HistoryItem[]>(`/analysis/history?limit=${limit}`);
+}
+
+// ---- Conversations -----------------------------------------------------------
+
+export type TitleSource = "default" | "auto" | "user";
+
+export interface Conversation {
+  id: string;
+  /** "New Chat" until the first meaningful query; never an uploaded filename. */
+  title: string;
+  /** "default" = still "New Chat", "auto" = set once from the first query, "user" = renamed. */
+  title_source: TitleSource;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationJob {
+  id: string;
+  imagery_id: string | null;
+  conversation_id: string | null;
+  analysis_type: AnalysisType;
+  query: string | null;
+  status: HistoryItem["status"];
+  created_at: string;
+}
+
+export interface ConversationDetail extends Conversation {
+  imagery: ImageryRecord[];
+  jobs: ConversationJob[];
+}
+
+export function createConversation() {
+  return request<Conversation>("/conversations", { method: "POST" });
+}
+
+/** Most recently active first -- the sidebar's data source. */
+export function listConversations(limit = 100) {
+  return request<Conversation[]>(`/conversations?limit=${limit}`);
+}
+
+/** The conversation plus its uploads (fresh URLs) and queries, oldest first. */
+export function getConversation(conversationId: string) {
+  return request<ConversationDetail>(`/conversations/${conversationId}`);
+}
+
+/** Manual rename -- the backend marks it user-defined so it is never auto-overwritten. */
+export function renameConversation(conversationId: string, title: string) {
+  return request<Conversation>(`/conversations/${conversationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+/**
+ * generateConversationTitle: asks the backend to title the conversation from
+ * its first meaningful stored query. Runs at most once per conversation
+ * (no-op once titled or renamed), so it is safe to call after any query.
+ */
+export function generateConversationTitle(conversationId: string) {
+  return request<Conversation>(`/conversations/${conversationId}/title`, { method: "POST" });
+}
+
+/** Deletes the conversation with its queries and uploaded files. */
+export function deleteConversation(conversationId: string) {
+  return request<{ id: string; status: string }>(`/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
 }
 
 export function getAnalysisJob(jobId: string) {

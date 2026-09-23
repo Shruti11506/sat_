@@ -42,6 +42,7 @@ def create_imagery_from_upload(
     sensor: str | None,
     acquisition_date: datetime | None,
     metadata: dict[str, Any] | None,
+    conversation_id: str | None = None,
 ) -> dict:
     """Insert the imagery metadata row after a successful Storage upload.
 
@@ -61,6 +62,8 @@ def create_imagery_from_upload(
         "acquisition_date": acquisition_date.isoformat() if acquisition_date else None,
         "metadata": metadata,
     }
+    if conversation_id:
+        row["conversation_id"] = conversation_id
 
     try:
         response = client.table(TABLE).insert(row).execute()

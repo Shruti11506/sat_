@@ -28,6 +28,8 @@ class AnalysisCreate(BaseModel):
     # pass that check. Emptiness is checked explicitly in analysis_service so
     # it raises the documented INVALID_QUERY error instead of a generic 422.
     query: str = Field(..., max_length=2000)
+    # Optional so existing clients keep working; the UI always sends it.
+    conversation_id: UUID | None = None
 
 
 class AnalysisCreateResponse(BaseModel):
@@ -35,4 +37,5 @@ class AnalysisCreateResponse(BaseModel):
     imagery_id: UUID
     analysis_type: AnalysisType
     query: str
+    conversation_id: UUID | None = None
     status: str = "queued"
