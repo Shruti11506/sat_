@@ -165,7 +165,11 @@ def get_conversation_detail(conversation_id: str) -> dict:
     conversation = get_conversation(conversation_id)
     client = get_supabase()
     imagery = [
-        {**row, "url": storage_service.resolve_url(client, row.get("storage_path"))}
+        {
+            **row,
+            "url": storage_service.resolve_url(client, row.get("storage_path")),
+            "thumbnail_url": imagery_service.resolve_thumbnail_url(client, row.get("storage_path")),
+        }
         for row in _select_for_conversation("imagery", conversation_id)
     ]
     jobs = _select_for_conversation("analysis_jobs", conversation_id)

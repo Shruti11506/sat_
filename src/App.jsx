@@ -10,6 +10,7 @@ import { AgentPipeline } from './components/AgentPipeline';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { ReportScreen } from './components/ReportScreen';
 import { ProfileDashboard } from './components/ProfileDashboard';
+import { SettingsPage } from './components/SettingsPage';
 import { ModelAttachmentScreen } from './components/ModelAttachmentScreen';
 import { ProjectsScreen } from './components/ProjectsScreen';
 import './components/ModelAndProjects.css';
@@ -21,6 +22,7 @@ import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/s
 import { UserHistorySidebar } from './components/UserHistorySidebar';
 import { getActiveModel, setActiveModelId } from './lib/modelsStorage';
 import { getActiveProject, getStoredProjects, setActiveProjectId, addChatToProject } from './lib/projectsStorage';
+import { getImageryPreviewUrl, getImageryGeo } from './lib/filePreview';
 import {
   getImagery,
   submitAnalysis,
@@ -28,15 +30,31 @@ import {
   createConversation,
   getConversation,
   generateConversationTitle,
-  getProfile
+  getProfile,
+  getSettings,
+  updateSettings,
+  applySettingsChanges
 } from './lib/apiClient';
 
 // Legacy pointer: chats created before conversations existed are keyed by imagery.
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
 // Pointer only (never data) to the open conversation, re-fetched on refresh.
 const LAST_CONVERSATION_KEY = 'satquery-last-conversation-id';
-// Set only while the profile screen is open, so a refresh reopens it.
+// Set only while the profile or settings screen is open, so a refresh reopens it.
 const LAST_SCREEN_KEY = 'satquery-last-screen';
+const RESTORABLE_SCREENS = ['profile', 'settings'];
+// Cached copies of the SAVED theme / sidebar density (GET /settings is the
+// source of truth), only so the first frame paints right before it answers.
+const THEME_KEY = 'satquery-theme';
+const DENSITY_KEY = 'satquery-sidebar-density';
+
+function prefersDarkScheme() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch {
+    return true;
+  }
+}
 
 function readPointer(key) {
   try {
@@ -71,7 +89,8 @@ function attachmentFromImagery(imagery) {
     name: imagery.original_filename || imagery.name,
     size: formatFileSize(imagery.file_size),
     sensor: imagery.sensor || null,
-    previewUrl: imagery.url,
+    previewUrl: getImageryPreviewUrl(imagery),
+    geo: getImageryGeo(imagery),
     imageryId: imagery.id
   };
 }
@@ -114,7 +133,7 @@ function buildConversationScenario(detail) {
       status: job.status,
       jobId: job.id,
       timestamp: ts,
-      evidenceThumb: imagery?.url || null
+      evidenceThumb: getImageryPreviewUrl(imagery)
     });
   });
 
@@ -125,7 +144,7 @@ function buildConversationScenario(detail) {
     title: latestImagery ? latestImagery.name : 'Untitled',
     sensor: latestImagery?.sensor || null,
     resolution: latestImagery ? formatFileSize(latestImagery.file_size) : null,
-    opticalImg: latestImagery?.url || null,
+    opticalImg: getImageryPreviewUrl(latestImagery),
     uploadedFile: latestImagery ? attachmentFromImagery(latestImagery) : null,
     chatHistory
   };
@@ -152,7 +171,7 @@ function buildLegacyScenario(imagery, historyItemsForImage = []) {
       status: item.status,
       jobId: item.job_id,
       timestamp: ts,
-      evidenceThumb: imagery.url
+      evidenceThumb: getImageryPreviewUrl(imagery)
     });
   });
 
@@ -163,22 +182,26 @@ function buildLegacyScenario(imagery, historyItemsForImage = []) {
     title: imagery.name,
     sensor: imagery.sensor || null,
     resolution: formatFileSize(imagery.file_size),
-    opticalImg: imagery.url,
+    opticalImg: getImageryPreviewUrl(imagery),
     uploadedFile: attachmentFromImagery(imagery),
     chatHistory
   };
 }
 
 export function App() {
-  // Theme state: dark (default presentation theme) or light (accessibility theme)
-  const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('satquery-theme') || 'dark';
-  });
-  // Patterned theme wavefront state
+  // Theme preference ('dark' | 'light' | 'system', saved in user_settings) and
+  // the theme actually shown. 'system' follows the OS setting live.
+  const [themePreference, setThemePreference] = useState(() => readPointer(THEME_KEY) || localStorage.getItem('satquery-theme') || 'dark');
+  const [sidebarDensity, setSidebarDensity] = useState(() => readPointer(DENSITY_KEY) || 'comfortable');
+  const [systemPrefersDark, setSystemPrefersDark] = useState(prefersDarkScheme);
+  const theme = themePreference === 'system' ? (systemPrefersDark ? 'dark' : 'light') : themePreference;
+  // Patterned theme wavefront state (ISRO satellite + NASA Earth animation)
   const [themeWave, setThemeWave] = useState(null);
 
-  // Active Screen state: 'landing', or the profile screen if it was open before a refresh.
-  const initialScreenRef = useRef(readPointer(LAST_SCREEN_KEY) === 'profile' ? 'profile' : 'landing');
+  // Active Screen state: 'landing', or the profile/settings screen if it was open before a refresh.
+  const initialScreenRef = useRef(
+    RESTORABLE_SCREENS.includes(readPointer(LAST_SCREEN_KEY)) ? readPointer(LAST_SCREEN_KEY) : 'landing'
+  );
   const [activeScreen, setActiveScreen] = useState(initialScreenRef.current);
   // Navigation history stack for step-by-step back navigation
   const [historyStack, setHistoryStack] = useState([]);
@@ -356,22 +379,102 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    rememberPointer(LAST_SCREEN_KEY, activeScreen === 'profile' ? 'profile' : null);
+    rememberPointer(LAST_SCREEN_KEY, RESTORABLE_SCREENS.includes(activeScreen) ? activeScreen : null);
   }, [activeScreen]);
+
+  // Settings (GET/PATCH /settings). App owns them so the header's theme toggle,
+  // the sidebar density and the Settings screen always agree.
+  const [settingsState, setSettingsState] = useState({ status: 'loading', data: null, error: null });
+  const settingsRef = useRef(null);
+  const settingsSaveSeqRef = useRef(0);
+
+  const showSettings = useCallback((data) => {
+    settingsRef.current = data;
+    setSettingsState({ status: 'ready', data, error: null });
+    setThemePreference(data.preferences.theme);
+    setSidebarDensity(data.preferences.sidebar_density);
+    // Read the OS setting now rather than trusting the value from page load.
+    if (data.preferences.theme === 'system') setSystemPrefersDark(prefersDarkScheme());
+  }, []);
+
+  const loadSettings = useCallback(() => {
+    setSettingsState((state) => ({ ...state, status: 'loading', error: null }));
+    getSettings()
+      .then(showSettings)
+      .catch((error) => {
+        console.error('[SatQuery] Could not load settings:', error);
+        settingsRef.current = null;
+        setSettingsState({ status: 'error', data: null, error });
+      });
+  }, [showSettings]);
+
+  useEffect(() => { loadSettings(); }, [loadSettings]);
+
+  // Optimistic: the change shows at once; the server's answer to the LATEST
+  // save wins, and a failed save puts the previous values back (and rejects,
+  // so the caller can say "Failed to save changes.").
+  const saveSettings = useCallback(async (changes) => {
+    const previous = settingsRef.current;
+    if (!previous) throw new Error('Settings are not loaded.');
+    const seq = ++settingsSaveSeqRef.current;
+    showSettings(applySettingsChanges(previous, changes));
+    try {
+      const saved = await updateSettings(changes);
+      if (seq === settingsSaveSeqRef.current) showSettings(saved);
+      return saved;
+    } catch (err) {
+      if (seq === settingsSaveSeqRef.current) showSettings(previous);
+      throw err;
+    }
+  }, [showSettings]);
+
+  // A profile edit (Settings or Profile screen): refresh the sidebar footer and
+  // the profile block of the loaded settings.
+  const handleProfileSaved = useCallback((user) => {
+    setProfileUser(user);
+    const current = settingsRef.current;
+    if (current) {
+      const { display_name, username, avatar_url, bio } = user;
+      showSettings({ ...current, profile: { display_name, username, avatar_url, bio } });
+    }
+  }, [showSettings]);
+
+  useEffect(() => {
+    let media;
+    try {
+      media = window.matchMedia('(prefers-color-scheme: dark)');
+    } catch {
+      return undefined;
+    }
+    const onChange = (event) => setSystemPrefersDark(event.matches);
+    // Also re-check on focus: not every environment fires the media 'change' event.
+    const recheck = () => setSystemPrefersDark(media.matches);
+    media.addEventListener?.('change', onChange);
+    window.addEventListener('focus', recheck);
+    return () => {
+      media.removeEventListener?.('change', onChange);
+      window.removeEventListener('focus', recheck);
+    };
+  }, []);
 
   // Sync theme with HTML data-theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('satquery-theme', theme);
-  }, [theme]);
+    rememberPointer(THEME_KEY, themePreference);
+  }, [theme, themePreference]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-sidebar-density', sidebarDensity);
+    rememberPointer(DENSITY_KEY, sidebarDensity);
+  }, [sidebarDensity]);
 
   // Page-refresh persistence: the backend database is the source of truth,
   // not localStorage -- this only remembers WHICH imagery to re-fetch, then
   // always re-fetches it (and its history) fresh from the API.
   useEffect(() => {
-    // A refresh on the profile screen stays there; the restored chat is one Back away.
+    // A refresh on the profile/settings screen stays there; the restored chat is one Back away.
     const showRestoredWorkspace = () => {
-      if (initialScreenRef.current === 'profile') setHistoryStack(['workspace']);
+      if (initialScreenRef.current !== 'landing') setHistoryStack(['workspace']);
       else setActiveScreen('workspace');
     };
     let lastConversationId;
@@ -425,10 +528,17 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally runs once on mount only
   }, []);
 
+  // Header sun/moon: triggers high-speed aerospace theme transition wavefront and updates preferences.
   const toggleTheme = (e) => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
     executeThemeTransition(nextTheme, e, {
-      onThemeUpdate: (t) => setTheme(t),
+      onThemeUpdate: (t) => {
+        setThemePreference(t);
+        try { localStorage.setItem('satquery-theme', t); } catch {}
+        if (settingsRef.current) {
+          saveSettings({ theme: t }).catch((err) => console.error('[SatQuery] Could not save theme:', err));
+        }
+      },
       onWaveStart: (wave) => setThemeWave(wave),
       onWaveEnd: () => setThemeWave(null)
     });
@@ -610,6 +720,7 @@ export function App() {
         projects={projects}
         activeProjectId={activeProject?.id || null}
         onOpenProject={handleOpenProject}
+        onOpenSettings={() => navigateToScreen('settings')}
       />
 
       <SidebarInset className="flex-1 flex flex-col min-w-0 min-h-screen relative overflow-x-hidden bg-transparent">
@@ -739,7 +850,16 @@ export function App() {
             )}
 
             {activeScreen === 'profile' && (
-              <ProfileDashboard onProfileUpdated={setProfileUser} />
+              <ProfileDashboard onProfileUpdated={handleProfileSaved} />
+            )}
+
+            {activeScreen === 'settings' && (
+              <SettingsPage
+                settingsState={settingsState}
+                onRetry={loadSettings}
+                onSave={saveSettings}
+                onProfileSaved={handleProfileSaved}
+              />
             )}
 
             {activeScreen === 'viewer' && (

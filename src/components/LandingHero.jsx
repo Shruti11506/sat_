@@ -6,6 +6,7 @@ import {
 import { ChitravitsEmblem } from './ui/ChitravitsLogo';
 import { SUGGESTED_QUERIES } from '../data/mockData';
 import { uploadImagery } from '../lib/apiClient';
+import { getFilePreviewUrl, getImageryGeo } from '../lib/filePreview';
 
 export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUploaded, activeModel, activeProject, onNavigateScreen }) {
   const [prompt, setPrompt] = useState('');
@@ -46,8 +47,7 @@ export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUpl
 
   const processFile = async (file) => {
     setIsValidating(true);
-    const isImageFile = file.type?.startsWith('image/') && !file.name.endsWith('.tif') && !file.name.endsWith('.tiff');
-    const previewUrl = isImageFile ? URL.createObjectURL(file) : '/assets/optical_satellite.jpg';
+    const previewUrl = getFilePreviewUrl(file);
 
     // sensor/crs/bands are intentionally left unset -- a plain browser file
     // carries no real sensor or CRS metadata, and none is fabricated (see
@@ -71,6 +71,10 @@ export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUpl
       console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
       filePayload.imageryId = result.id;
       filePayload.conversationId = conversationId;
+      // TIFF/GeoTIFF: the backend's rendered thumbnail replaces the placeholder,
+      // and real coordinates come along when the file had a CRS.
+      if (result.thumbnail_url) filePayload.previewUrl = result.thumbnail_url;
+      filePayload.geo = getImageryGeo(result);
       onImageryUploaded?.();
     } catch (err) {
       console.error('[SatQuery] Image upload to backend failed:', err);

@@ -12,15 +12,18 @@ import {
   Plus,
   GitCompare,
   BarChart3,
+  Telescope,
   Sparkles,
+  BadgeDollarSign,
   Settings,
-  HelpCircle,
+  CircleHelp,
+  Satellite,
+  Waves,
+  FileBarChart,
   User,
   MoreHorizontal,
   Share2,
   Clock,
-  Sun,
-  Moon,
   AlertCircle,
   RefreshCw,
   Pencil,
@@ -68,12 +71,13 @@ interface UserHistorySidebarProps {
   /** The workspace profile from GET /profile; null while loading or if unavailable. */
   profileUser?: ProfileUser | null
   onOpenProfile?: () => void
-  theme: string
-  onToggleTheme: () => void
+  theme?: string
+  onToggleTheme?: (e?: any) => void
   activeModel?: any
   projects?: any[]
   activeProjectId?: string | null
   onOpenProject?: (project: any) => void
+  onOpenSettings: () => void
 }
 
 // One sidebar row. Conversations carry their stored title; legacy entries
@@ -125,6 +129,16 @@ function ProfileAvatar({ user, className }: { user?: ProfileUser | null; classNa
         : user ? initialsOf(user.display_name) : <User className="w-3.5 h-3.5" />}
     </div>
   )
+}
+
+// Small, uniform row icon picked from the title's keywords -- presentation
+// only; every icon renders at the same size and muted color (see the
+// "Sidebar rows" block in index.css).
+function ConversationIcon({ title }: { title: string }) {
+  if (/\b(sar|radar)\b/i.test(title)) return <Satellite aria-hidden="true" />
+  if (/water|flood|river|lake|ndwi/i.test(title)) return <Waves aria-hidden="true" />
+  if (/report|summary|dossier/i.test(title)) return <FileBarChart aria-hidden="true" />
+  return <ImageIcon aria-hidden="true" />
 }
 
 function truncate(text: string, max = 60): string {
@@ -265,7 +279,8 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
             }
           }}
           aria-label="Conversation title"
-          className="w-full h-8.5 rounded-lg px-2 text-[0.88rem] bg-sidebar-accent text-sidebar-foreground outline-none ring-1 ring-blue-500/60"
+          style={{ padding: "0 10px" }}
+          className="w-full h-[38px] rounded-lg text-[14px] bg-[rgba(59,130,246,0.08)] text-sidebar-foreground outline-none ring-1 ring-blue-500/60"
         />
       </SidebarMenuItem>
     )
@@ -276,9 +291,11 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
       <SidebarMenuButton
         onClick={() => onSelect(entry)}
         isActive={isActive}
-        className="group/item text-[0.88rem] py-1.5 h-8.5 rounded-lg"
+        data-row="conversation"
+        className="group/item"
         tooltip={entry.title}
       >
+        <ConversationIcon title={entry.title} />
         <span className="truncate">{entry.title}</span>
       </SidebarMenuButton>
 
@@ -287,7 +304,6 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
           <SidebarMenuAction
             ref={triggerRef}
             showOnHover
-            className="top-2"
             data-state={isMenuOpen ? "open" : "closed"}
             onClick={(e) => {
               e.stopPropagation()
@@ -363,7 +379,8 @@ export function UserHistorySidebar({
   activeModel,
   projects,
   activeProjectId,
-  onOpenProject
+  onOpenProject,
+  onOpenSettings
 }: UserHistorySidebarProps) {
   // Real backend data ONLY -- see CLAUDE.md / backend README. No hardcoded
   // entries, and a failed fetch never falls back to stale/sample data.
@@ -515,10 +532,9 @@ export function UserHistorySidebar({
                 onNewChat()
                 if (isMobile) setOpenMobile(false)
               }}
-              className="font-medium text-[0.92rem] py-2 h-9"
               tooltip="New Chat"
             >
-              <SquarePen className="w-4 h-4 text-sidebar-foreground" />
+              <SquarePen aria-hidden="true" />
               <span>New chat</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -530,10 +546,9 @@ export function UserHistorySidebar({
                 if (isMobile) setOpenMobile(false)
               }}
               isActive={activeScreen === "fusion"}
-              className="text-[0.92rem] py-2 h-9"
               tooltip="Multimodal Satellite Images"
             >
-              <ImageIcon className="w-4 h-4 text-sidebar-foreground" />
+              <ImageIcon aria-hidden="true" />
               <span>Images</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -545,10 +560,9 @@ export function UserHistorySidebar({
                 if (isMobile) setOpenMobile(false)
               }}
               isActive={activeScreen === "pipeline"}
-              className="text-[0.92rem] py-2 h-9"
               tooltip="Agentic Remote Sensing Pipeline"
             >
-              <Puzzle className="w-4 h-4 text-sidebar-foreground" />
+              <Puzzle aria-hidden="true" />
               <span>Plugins</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -596,10 +610,9 @@ export function UserHistorySidebar({
                 if (isMobile) setOpenMobile(false)
               }}
               isActive={activeScreen === "report"}
-              className="text-[0.92rem] py-2 h-9"
               tooltip="Intelligence Dossier Research"
             >
-              <Compass className="w-4 h-4 text-sidebar-foreground" />
+              <Telescope aria-hidden="true" />
               <span>Deep research</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -707,25 +720,23 @@ export function UserHistorySidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => onNavigateScreen("report")}
-              className="text-[0.88rem] py-1.5 h-8.5"
               tooltip="SatQuery Enterprise Plans"
             >
-              <Sparkles className="w-4 h-4 text-blue-400" />
+              <BadgeDollarSign aria-hidden="true" />
               <span>See plans and pricing</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
 
           <SidebarMenuItem>
             <SidebarMenuButton
-              onClick={onToggleTheme}
-              className="text-[0.88rem] py-1.5 h-8.5"
-              tooltip={`Switch to ${theme === "dark" ? "Light" : "Dark"} Mode`}
+              onClick={() => {
+                onOpenSettings()
+                if (isMobile) setOpenMobile(false)
+              }}
+              isActive={activeScreen === "settings"}
+              tooltip="Settings & Appearance"
             >
-              {theme === "dark" ? (
-                <Sun className="w-4 h-4 text-yellow-400" />
-              ) : (
-                <Moon className="w-4 h-4 text-blue-500" />
-              )}
+              <Settings aria-hidden="true" />
               <span>Settings & Appearance</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -733,10 +744,9 @@ export function UserHistorySidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => onNavigateScreen("pipeline")}
-              className="text-[0.88rem] py-1.5 h-8.5"
               tooltip="Documentation & ISRO Help"
             >
-              <HelpCircle className="w-4 h-4 text-sidebar-foreground" />
+              <CircleHelp aria-hidden="true" />
               <span>Help & Mission Guide</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -757,9 +767,9 @@ export function UserHistorySidebar({
                 aria-expanded={isProfileMenuOpen}
                 onClick={() => setIsProfileMenuOpen((open) => !open)}
                 style={{ padding: "0 8px" }}
-                className="h-[48px] w-full gap-[10px] rounded-lg hover:bg-sidebar-accent"
+                className="h-[52px] w-full gap-[10px] rounded-lg"
               >
-                <ProfileAvatar user={profileUser} className="h-[32px] w-[32px] text-[12px]" />
+                <ProfileAvatar user={profileUser} className="h-[36px] w-[36px] text-[13px]" />
                 <div className="flex min-w-0 flex-1 flex-col justify-center">
                   <span className="truncate text-[15px] font-semibold leading-5 text-sidebar-foreground">
                     {profileUser?.display_name ?? "Profile"}
@@ -810,7 +820,14 @@ export function UserHistorySidebar({
                         if (isMobile) setOpenMobile(false)
                       }
                     },
-                    { label: "Settings", icon: <Settings className="h-[16px] w-[16px] text-[#cbd5e1]" />, onSelect: onToggleTheme },
+                    {
+                      label: "Settings",
+                      icon: <Settings className="h-[16px] w-[16px] text-[#cbd5e1]" />,
+                      onSelect: () => {
+                        onOpenSettings()
+                        if (isMobile) setOpenMobile(false)
+                      }
+                    },
                     {
                       label: "Upgrade Plan",
                       icon: <Sparkles className="h-[16px] w-[16px] text-blue-400" />,

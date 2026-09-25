@@ -189,6 +189,9 @@ class FakeBucketHandle:
         return f"https://fake.supabase.co/storage/v1/object/public/{self.bucket_name}/{path}"
 
     def create_signed_url(self, path: str, expires_in: int) -> dict:
+        # Real Supabase Storage refuses to sign a missing object ("Object not found").
+        if f"{self.bucket_name}/{path}" not in self.storage.objects:
+            raise FakeStorageApiError("Object not found", status="400", code="404")
         return {"signedURL": f"https://fake.supabase.co/storage/v1/object/sign/{self.bucket_name}/{path}?token=fake"}
 
 

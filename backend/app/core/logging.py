@@ -20,3 +20,5 @@ def configure_logging(app_env: str = "development") -> None:
     # `authorization` headers, i.e. the Supabase service-role key.
     logging.getLogger("hpack").setLevel(logging.WARNING)
     logging.getLogger("h2").setLevel(logging.WARNING)
+    # rasterio/GDAL (GeoTIFF thumbnails) log every read step at DEBUG.
+    logging.getLogger("rasterio").setLevel(logging.WARNING)

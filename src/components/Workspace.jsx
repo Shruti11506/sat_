@@ -8,6 +8,7 @@ import {
 import { ImageViewer } from './ImageViewer';
 import { uploadImagery, submitAnalysis } from '../lib/apiClient';
 import { runModelInference } from '../lib/modelsStorage';
+import { getFilePreviewUrl, getImageryGeo, fileExtensionLabel } from '../lib/filePreview';
 
 const QUICK_SUGGESTIONS = [
   { icon: '📄', label: 'Give me the Report', text: 'Give me the report for this satellite scene' },
@@ -39,6 +40,16 @@ export function Workspace({
   const [activeEvidenceHighlight, setActiveEvidenceHighlight] = useState(null);
   const [pendingAttachment, setPendingAttachment] = useState(null);
   const [activeViewerImage, setActiveViewerImage] = useState(scenario.opticalImg);
+  // Real georeference of the image in the viewer (null = none known).
+  const [activeViewerGeo, setActiveViewerGeo] = useState(scenario.uploadedFile?.geo || null);
+  // Local id of a still-uploading attachment shown in the viewer, so its
+  // thumbnail/coordinates can replace the placeholder when the upload lands.
+  const viewerAttachmentRef = useRef(null);
+  const showInViewer = (url, geo = null, attachmentLocalId = null) => {
+    setActiveViewerImage(url);
+    setActiveViewerGeo(geo);
+    viewerAttachmentRef.current = attachmentLocalId;
+  };
   // Real Supabase-backed imagery id the chat's queries run against: the most
   // recent upload in this conversation. It persists across messages so
   // follow-up questions ("now calculate the area") refer to the same image.
@@ -55,9 +66,9 @@ export function Workspace({
   useEffect(() => {
     setMessages(scenario.chatHistory || []);
     if (scenario.uploadedFile?.previewUrl) {
-      setActiveViewerImage(scenario.uploadedFile.previewUrl);
+      showInViewer(scenario.uploadedFile.previewUrl, scenario.uploadedFile.geo);
     } else if (scenario.opticalImg) {
-      setActiveViewerImage(scenario.opticalImg);
+      showInViewer(scenario.opticalImg);
     }
     // Carry over the real backend imagery_id if the scene arrived via a real
     // upload (LandingHero) or a restored conversation.
@@ -99,7 +110,7 @@ export function Workspace({
 
     // If user attached an image, update active satellite viewer on the left
     if (attachmentPayload?.previewUrl) {
-      setActiveViewerImage(attachmentPayload.previewUrl);
+      showInViewer(attachmentPayload.previewUrl, attachmentPayload.geo);
     }
 
     setMessages(prev => [...prev, userMsg]);
@@ -202,8 +213,7 @@ export function Workspace({
   const handleFileAttach = (e) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      const isImage = file.type?.startsWith('image/') && !file.name.endsWith('.tif') && !file.name.endsWith('.tiff');
-      const previewUrl = isImage ? URL.createObjectURL(file) : '/assets/optical_satellite.jpg';
+      const previewUrl = getFilePreviewUrl(file);
 
       // sensor/crs are left unset -- a plain browser file upload carries no
       // real sensor or CRS metadata, and neither is fabricated (see section
@@ -218,7 +228,7 @@ export function Workspace({
       };
 
       setPendingAttachment(filePayload);
-      setActiveViewerImage(previewUrl);
+      showInViewer(previewUrl, null, localId);
 
       // Give control directly to the chat box!
       setTimeout(() => {
@@ -244,7 +254,11 @@ export function Workspace({
             conversationId: targetConversationId || undefined
           });
           console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
-          settle({ imageryId: result.id });
+          const geo = getImageryGeo(result);
+          settle({ imageryId: result.id, previewUrl: result.thumbnail_url || previewUrl, geo });
+          if (viewerAttachmentRef.current === localId) {
+            showInViewer(result.thumbnail_url || previewUrl, geo, localId);
+          }
           onImageryUploaded?.();
           if (scenario.isLegacy) {
             try {
@@ -289,6 +303,7 @@ export function Workspace({
       <div className="workspace-left">
         <ImageViewer
           imageUrl={activeViewerImage}
+          geo={activeViewerGeo}
           scenario={scenario}
           onInspectElement={(elem) => setActiveEvidenceHighlight(elem)}
           showBBoxesDefault={false}
@@ -371,10 +386,10 @@ export function Workspace({
                           src={msg.attachment.previewUrl || msg.attachment} 
                           alt={msg.attachment.name || "Attached satellite scene"} 
                           className="chat-user-thumb" 
-                          onClick={() => setActiveViewerImage(msg.attachment.previewUrl || msg.attachment)}
+                          onClick={() => showInViewer(msg.attachment.previewUrl || msg.attachment, msg.attachment.geo)}
                           title="Click to view in main satellite panel"
                         />
-                        <span className="chat-user-thumb-badge">GeoTIFF</span>
+                        <span className="chat-user-thumb-badge">{fileExtensionLabel(msg.attachment.name)}</span>
                       </div>
                       <div className="chat-attachment-info">
                         <div className="chat-attachment-name">{msg.attachment.name || "Attached file"}</div>
@@ -702,7 +717,7 @@ export function Workspace({
               <div className="pending-attachment-chip">
                 <div className="pending-thumb-wrapper">
                   <img src={pendingAttachment.previewUrl} alt="preview" className="pending-thumb" />
-                  <span className="pending-badge">GeoTIFF</span>
+                  <span className="pending-badge">{fileExtensionLabel(pendingAttachment.name)}</span>
                 </div>
                 <div className="pending-meta">
                   <span className="pending-name">{pendingAttachment.name}</span>
