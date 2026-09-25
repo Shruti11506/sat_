@@ -5,6 +5,7 @@ import {
   ImagePlus, X, Satellite, Layers, MapPin, ArrowLeft, GitCompare
 } from 'lucide-react';
 import { ImageViewer } from './ImageViewer';
+import { uploadImagery, submitAnalysis } from '../lib/apiClient';
 
 const QUICK_SUGGESTIONS = [
   { icon: '📄', label: 'Give me the Report', text: 'Give me the report for this satellite scene' },
@@ -15,7 +16,9 @@ const QUICK_SUGGESTIONS = [
   { icon: '🛰️', label: 'Sensor & CRS Specs', text: 'Show sensor specifications, GSD resolution, and coordinate reference system' }
 ];
 
-export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
+const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
+
+export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted, onEnsureConversation, onImageryUploaded }) {
   const [messages, setMessages] = useState(scenario.chatHistory || []);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -25,6 +28,13 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
   const [activeEvidenceHighlight, setActiveEvidenceHighlight] = useState(null);
   const [pendingAttachment, setPendingAttachment] = useState(null);
   const [activeViewerImage, setActiveViewerImage] = useState(scenario.opticalImg);
+  // Real Supabase-backed imagery id the chat's queries run against: the most
+  // recent upload in this conversation. It persists across messages so
+  // follow-up questions ("now calculate the area") refer to the same image.
+  const [backendImageryId, setBackendImageryId] = useState(null);
+  // Conversation this chat belongs to. null for legacy (pre-conversation)
+  // chats, and for a chat whose first upload failed (created on next attach).
+  const [conversationId, setConversationId] = useState(scenario.conversationId || null);
 
   const textareaRef = useRef(null);
   const chatBottomRef = useRef(null);
@@ -38,6 +48,11 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
     } else if (scenario.opticalImg) {
       setActiveViewerImage(scenario.opticalImg);
     }
+    // Carry over the real backend imagery_id if the scene arrived via a real
+    // upload (LandingHero) or a restored conversation.
+    setBackendImageryId(scenario.uploadedFile?.imageryId || null);
+    setConversationId(scenario.conversationId || null);
+    setPendingAttachment(null);
   }, [scenario]);
 
   // Give immediate control to the chat box when workspace mounts or scene updates
@@ -53,101 +68,20 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  // Intelligent domain-grounded conversational responses (like ChatGPT/Gemini for remote sensing)
-  const generateAgentResponse = (userQuery, attachment) => {
-    const q = (userQuery || '').toLowerCase();
-    const sceneName = attachment?.name || scenario.uploadedFile?.name || scenario.title || 'Cartosat-3 Scene';
-
-    if (q.includes('water') || q.includes('lake') || q.includes('reservoir') || q.includes('flood') || q.includes('river')) {
-      return {
-        taskType: 'Hydrological Surface Delineation (NDWI)',
-        confidence: '97.8',
-        text: `Hydrological analysis completed for **${sceneName}**.\n\n• **Water Index (NDWI)**: Detected primary reservoir boundary with mean index of **+0.54** (Green Band 3 - NIR Band 8).\n• **Surface Area**: Segmented surface extent is **2.41 km²** (±0.04 km² uncertainty).\n• **Shoreline Integrity**: Edge gradients show stable shoreline embankment with no active flood overflow or breaching detected.\n• **Suspended Solids / Turbidity**: Reflectance ratios indicate low sediment suspension across central basin.\n\nWould you like to export the vector boundary polygon as GeoJSON or inspect shoreline change detection?`,
-        executionSteps: [
-          { step: 'Band Extraction', desc: 'Loaded calibrated Green (560nm) and NIR (840nm) reflectance rasters', time: '98ms' },
-          { step: 'NDWI Ratioing', desc: 'Normalized Difference Water Index computation: (B3 - B8) / (B3 + B8)', time: '115ms' },
-          { step: 'Otsu Thresholding', desc: 'Extracted zero-crossing contour to vectorize water perimeter', time: '142ms' },
-          { step: 'Spatial Metrics', desc: 'Calculated surface area in UTM Zone 43N projected coordinates', time: '85ms' }
-        ]
-      };
-    }
-
-    if (q.includes('vegetation') || q.includes('forest') || q.includes('ndvi') || q.includes('tree') || q.includes('canopy') || q.includes('green') || q.includes('crop')) {
-      return {
-        taskType: 'Vegetation Canopy & Biomass Health (NDVI)',
-        confidence: '96.5',
-        text: `Vegetation canopy analysis completed for **${sceneName}**.\n\n• **Vegetation Index (NDVI)**: Healthy vegetative canopy confirmed with mean score of **+0.68** (NIR - Red).\n• **Land Cover Coverage**: Dense trees and riparian buffer constitute **34.2%** of the total observed quadrant.\n• **Moisture & Vigor**: Strong chlorophyll absorption dip at 660nm and cellular scattering at 840nm verify no acute drought stress or crown dieback.\n• **Zonal Variance**: Riparian buffer zone shows peak NDVI (+0.79), while residential fringe buffers average +0.42.\n\nWould you like to overlay the NDVI pseudo-color heatmap or inspect crown density distribution?`,
-        executionSteps: [
-          { step: 'Reflectance Calibration', desc: 'Calibrated Top-Of-Atmosphere Red and NIR spectral channels', time: '104ms' },
-          { step: 'NDVI Index Processing', desc: 'Calculated per-pixel NDVI matrix: (B8 - B4) / (B8 + B4)', time: '122ms' },
-          { step: 'Zonal Statistics', desc: 'Aggregated canopy density across agricultural and forest polygons', time: '135ms' }
-        ]
-      };
-    }
-
-    if (q.includes('building') || q.includes('urban') || q.includes('structure') || q.includes('house') || q.includes('road') || q.includes('built') || q.includes('sar')) {
-      return {
-        taskType: 'Urban Structure Extraction & SAR Radar Fusion',
-        confidence: '98.2',
-        text: `Urban infrastructure analysis completed for **${sceneName}**.\n\n• **Structure Count**: Identified **142 permanent building footprints** at sub-meter spatial precision.\n• **SAR Double-Bounce Verification**: Co-registered RISAT-1A SAR C-band radar reveals strong right-angle dihedral reflections (VV/VH backscatter **-12.4 dB**), validating concrete and metallic structures.\n• **Road & Transit Corridor**: 18.4 km of paved access corridors traced with zero obstruction anomalies.\n• **Structural Integrity**: No subsidence or unauthorized structural encroachment detected in the surveyed corridor.\n\nWould you like to highlight the detected building bounding boxes on the viewer?`,
-        executionSteps: [
-          { step: 'Optical High-Pass Filter', desc: 'Extracted rooftop geometry on 0.28m panchromatic band', time: '130ms' },
-          { step: 'SAR Co-registration', desc: 'Orthorectified Sentinel-1/RISAT-1A radar amplitude backscatter', time: '195ms' },
-          { step: 'Double-Bounce Correlation', desc: 'Cross-matched corner-reflector radar peaks with optical outlines', time: '160ms' },
-          { step: 'Vector Polygonization', desc: 'Generated 142 individual building polygon footprints', time: '140ms' }
-        ]
-      };
-    }
-
-    if (q.includes('change') || q.includes('difference') || q.includes('historic') || q.includes('temporal') || q.includes('timeline')) {
-      return {
-        taskType: 'Bi-Temporal Change Detection Analysis',
-        confidence: '95.4',
-        text: `Bi-temporal change detection computed for **${sceneName}**.\n\n• **Urban Expansion**: **+12.4%** increase in built-up footprint relative to baseline satellite pass.\n• **Water Surface Shift**: **-4.2%** seasonal shoreline retreat during dry-weather cycle.\n• **Forest Buffer Stability**: Riparian green corridor shows negligible variance (**-0.8%**), demonstrating strict conservation adherence.\n• **Anomalies**: 0 unpermitted clearing events detected across the surveyed zone.\n\nWould you like to open the split-slider swipe viewer to inspect the before-and-after overlays?`,
-        executionSteps: [
-          { step: 'Sub-Pixel Co-Registration', desc: 'Aligned T1 Baseline and T2 Present GeoTIFFs to sub-pixel accuracy', time: '185ms' },
-          { step: 'Radiometric Normalization', desc: 'Dark-Object Subtraction (DOS1) atmospheric illumination correction', time: '160ms' },
-          { step: 'Change Vector Analysis', desc: 'Computed spectral magnitude shift across all optical bands', time: '210ms' }
-        ]
-      };
-    }
-
-    if (q.includes('resolution') || q.includes('sensor') || q.includes('band') || q.includes('satellite') || q.includes('crs') || q.includes('geotiff')) {
-      return {
-        taskType: 'Sensor Telemetry & Geospatial Metadata',
-        confidence: '99.4',
-        text: `Sensor telemetry report for **${sceneName}**:\n\n• **Primary Sensor**: Cartosat-3 High-Resolution Panchromatic & Multispectral Imager\n• **Spatial Resolution (GSD)**: **0.28 meters** (PAN) / **1.12 meters** (Multispectral 4-Band)\n• **Spectral Channels**: Blue (450-520nm), Green (520-590nm), Red (630-690nm), Near-Infrared (770-860nm)\n• **Secondary Sensor**: RISAT-1A / EOS-04 C-band Synthetic Aperture Radar (SAR)\n• **Coordinate System**: **EPSG:4326 (WGS84)** Geodetic / UTM Zone 43N Projected\n• **Radiometric Precision**: 16-bit unsigned integer depth, georeferenced RPC headers intact.\n\nWhat specific spectral band or geographic coordinate would you like to query?`,
-        executionSteps: [
-          { step: 'GeoTIFF Header Inspection', desc: 'Parsed GDAL metadata tags, raster dimensions, and geotransform', time: '42ms' },
-          { step: 'CRS Coordinate Check', desc: 'Validated WGS84 ellipsoid projections and datum bounds', time: '38ms' },
-          { step: 'Radiometric Calibration', desc: 'Loaded 4-band spectral sensitivity calibration profiles', time: '65ms' }
-        ]
-      };
-    }
-
-    // Default intelligent multimodal response
-    return {
-      taskType: 'Multimodal Earth Observation Intelligence',
-      confidence: '96.8',
-      text: `Analysis complete for **${sceneName}** based on your prompt: "${userQuery || 'Extract spatial features'}".\n\n• **Spectral Evidence**: Multispectral reflectance confirms robust land-cover segmentation. Water indices (**NDWI +0.54**) and canopy metrics (**NDVI +0.68**) are fully calibrated.\n• **Infrastructure & Built-Up**: Sub-meter spatial resolution clearly delineates 142 permanent structures and primary transport corridors.\n• **Geo-spatial Validity**: Spatial bounds verified under EPSG:4326 (WGS84) with 0.28m GSD precision.\n\nYou can continue asking questions about specific zones, measure areas, or attach additional satellite scenes.`,
-      executionSteps: scenario.chatHistory[1]?.executionSteps || [
-        { step: 'Multi-spectral Ingestion', desc: 'Loaded 4-band GeoTIFF array into tensor memory', time: '92ms' },
-        { step: 'Foundation Model Inference', desc: 'Executed Prithvi-EO 100M vision-language embedding', time: '210ms' },
-        { step: 'Feature Vectorization', desc: 'Generated geo-located vector contours and confidence metrics', time: '145ms' }
-      ]
-    };
-  };
-
+  // Sends the query to the real backend (POST /api/v1/analysis) and stores
+  // an analysis_jobs row -- no AI model runs, so the response is a neutral
+  // "queued" acknowledgment, never a fabricated analysis result.
   const handleSendMessage = (textToSend) => {
     const query = (textToSend !== undefined ? textToSend : inputText).trim();
     if (!query && !pendingAttachment) return;
+    if (pendingAttachment?.uploading) return;
 
     const attachmentPayload = pendingAttachment;
 
     const userMsg = {
       id: `usr-${Date.now()}`,
       sender: 'user',
-      text: query || (attachmentPayload ? `Analyze attached satellite scene: ${attachmentPayload.name}` : ''),
+      text: query,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       attachment: attachmentPayload || null
     };
@@ -161,117 +95,77 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
     setInputText('');
     setPendingAttachment(null);
 
-    const q = query.toLowerCase();
-    const sceneName = attachmentPayload?.name || scenario.uploadedFile?.name || scenario.title || 'Cartosat-3 Scene';
-
-    // 1. Report Redirection: "give me the report", "report", "generate report", etc.
-    const isReportRequest = 
-      q.includes('report') || 
-      q.includes('dossier') ||
-      q.includes('summary pdf');
-
-    if (isReportRequest) {
-      setIsTyping(true);
-      setTimeout(() => {
-        const aiResponse = {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: `📄 **Intelligence Dossier Report Generated** for **${sceneName}**.\n\n• **Executive Summary**: Synthesized multispectral analysis, NDWI water contours, and infrastructure footprints.\n• **Export Options**: GeoJSON vector export and printable official ISRO dossier layout.\n\nRedirecting you to the **Report** screen...`,
-          confidence: '99.4',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage || scenario.opticalImg,
-          taskType: 'Intelligence Dossier Synthesis',
-          modelChain: 'ISRO-GeoVision-LLaVA v3.2 + Report Synthesizer',
-          actionLink: { screen: 'report', label: 'Open Full Report ↗' },
-          executionSteps: [
-            { step: 'Report Generation', desc: 'Compiled spatial features and executive summary', time: '45ms' },
-            { step: 'GeoJSON Packaging', desc: 'Exported polygon feature vectors to GeoJSON schema', time: '38ms' },
-            { step: 'Screen Transition', desc: 'Navigating to Report View', time: '12ms' }
-          ]
-        };
-
-        setMessages(prev => [...prev, aiResponse]);
-        setIsTyping(false);
-        setExpandedSummaryId(aiResponse.id);
-
-        setTimeout(() => {
-          onNavigateScreen('report');
-        }, 450);
-      }, 350);
-      return;
+    // A newly attached (and successfully uploaded) image becomes the chat's
+    // active image; otherwise the query targets the current one.
+    const imageryIdForAnalysis = attachmentPayload ? attachmentPayload.imageryId || null : backendImageryId;
+    if (attachmentPayload?.imageryId) {
+      setBackendImageryId(attachmentPayload.imageryId);
     }
 
-    // 2. Compare Redirection: "compare these both", "compare", "change detection", "before and after", etc.
-    const isCompareRequest = 
-      q.includes('compare') || 
-      q.includes('comparison') || 
-      q.includes('before and after') || 
-      q.includes('change detection') || 
-      q.includes('difference') ||
-      q.includes('temporal');
-
-    if (isCompareRequest) {
-      setIsTyping(true);
-      setTimeout(() => {
-        const aiResponse = {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: `🔄 **Bi-Temporal Comparison Engine Loaded** for **${sceneName}**.\n\n• **Baseline Epoch**: 2021 pre-development survey.\n• **Present Epoch**: 2026 Cartosat-3 acquisition.\n• **Ground Delta**: +14.2% built-up expansion, -8.6% vegetation shift.\n\nRedirecting you to the interactive **Bi-Temporal Change Detection & Comparison** split-slider...`,
-          confidence: '97.8',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage || scenario.opticalImg,
-          taskType: 'Bi-Temporal Change Detection & Comparison',
-          modelChain: 'ISRO-GeoVision-LLaVA v3.2 + Sub-Pixel Co-registration',
-          actionLink: { screen: 'change', label: 'Open Comparison Slider ↗' },
-          executionSteps: [
-            { step: 'Co-Registration', desc: 'Sub-pixel co-registration of 2021 and 2026 rasters', time: '82ms' },
-            { step: 'Change Vector Analysis', desc: 'Spectral magnitude difference calculation', time: '110ms' },
-            { step: 'Screen Transition', desc: 'Navigating to Change Detection View', time: '15ms' }
-          ]
-        };
-
-        setMessages(prev => [...prev, aiResponse]);
-        setIsTyping(false);
-        setExpandedSummaryId(aiResponse.id);
-
-        setTimeout(() => {
-          onNavigateScreen('change');
-        }, 450);
-      }, 350);
-      return;
-    }
-
-    setIsTyping(true);
-
-    // Re-focus input box immediately so user can continue typing (ChatGPT / Gemini style)
     setTimeout(() => {
       textareaRef.current?.focus();
     }, 50);
 
-    // Simulate agent reasoning delay
-    setTimeout(() => {
-      const generated = generateAgentResponse(query, attachmentPayload);
-      const aiResponse = {
+    if (!imageryIdForAnalysis) {
+      // No real Supabase-backed image to reference -- backend requires a
+      // valid imagery_id, so there is nothing honest to submit. No AI/fake
+      // response is generated either way.
+      // An image on screen with no persisted imagery_id means its upload never
+      // reached the backend (e.g. backend not running) -- say that, rather than
+      // asking the user to attach an image they can already see.
+      const unsavedImageShown = !attachmentPayload && Boolean(activeViewerImage);
+      const notice = {
         id: `ai-${Date.now()}`,
         sender: 'ai',
-        text: generated.text,
-        confidence: generated.confidence,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage || scenario.opticalImg,
-        taskType: generated.taskType,
-        modelChain: 'ISRO-GeoVision-LLaVA v3.2 + Prithvi-EO 100M',
-        executionSteps: generated.executionSteps
+        text: attachmentPayload
+          ? 'This image could not be uploaded to the backend, so no analysis request could be submitted. Please try attaching it again.'
+          : unsavedImageShown
+            ? 'The image shown was never saved to the backend (its upload failed -- check that the backend is running), so no analysis request was submitted. Re-attach the image to try again.'
+            : 'Please attach a satellite image before submitting a query -- an analysis request must reference an uploaded image.',
+        isError: Boolean(attachmentPayload) || unsavedImageShown,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
+      setMessages(prev => [...prev, notice]);
+      return;
+    }
 
-      setMessages(prev => [...prev, aiResponse]);
-      setIsTyping(false);
-      setExpandedSummaryId(aiResponse.id);
+    // Attaching an image without typing anything just adds it to the chat;
+    // no query is invented on the user's behalf.
+    if (!query) return;
 
-      // Keep focus on textarea for fluid conversation flow
-      setTimeout(() => {
-        textareaRef.current?.focus();
-      }, 100);
-    }, 1100);
+    setIsTyping(true);
+
+    const conversationForQuery = conversationId;
+    submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery)
+      .then((job) => {
+        const ack = {
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: 'Analysis request submitted.',
+          status: job.status,
+          jobId: job.job_id,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage
+        };
+        setMessages(prev => [...prev, ack]);
+        onAnalysisSubmitted?.(conversationForQuery);
+      })
+      .catch((err) => {
+        const errorMsg = {
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: `Failed to submit analysis request: ${err.message || 'unknown error'}`,
+          isError: true,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+        setMessages(prev => [...prev, errorMsg]);
+      })
+      .finally(() => {
+        setIsTyping(false);
+        setTimeout(() => {
+          textareaRef.current?.focus();
+        }, 100);
+      });
   };
 
   // Handle image attachment from within the chat box
@@ -281,12 +175,16 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
       const isImage = file.type?.startsWith('image/') && !file.name.endsWith('.tif') && !file.name.endsWith('.tiff');
       const previewUrl = isImage ? URL.createObjectURL(file) : '/assets/optical_satellite.jpg';
 
+      // sensor/crs are left unset -- a plain browser file upload carries no
+      // real sensor or CRS metadata, and neither is fabricated (see section
+      // 9: do not invent satellite/sensor/coordinate data).
+      const localId = `att-${Date.now()}`;
       const filePayload = {
+        localId,
         name: file.name,
         size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
-        sensor: 'Optical + SAR GeoTIFF (0.28m GSD)',
         previewUrl: previewUrl,
-        crs: 'EPSG:4326 (WGS84)'
+        uploading: true
       };
 
       setPendingAttachment(filePayload);
@@ -296,6 +194,40 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
       setTimeout(() => {
         textareaRef.current?.focus();
       }, 50);
+
+      const settle = (changes) =>
+        setPendingAttachment(prev => (prev?.localId === localId ? { ...prev, uploading: false, ...changes } : prev));
+
+      // Real upload to Supabase Storage (bucket: Satquery) via FastAPI, in
+      // parallel with the local preview above. It joins this chat's
+      // conversation (legacy chats have none) and never renames it. Sending
+      // waits until the upload settles so the query targets this image.
+      (async () => {
+        try {
+          let targetConversationId = conversationId;
+          if (!targetConversationId && !scenario.isLegacy && onEnsureConversation) {
+            targetConversationId = await onEnsureConversation();
+            setConversationId(targetConversationId);
+          }
+          const result = await uploadImagery(file, {
+            name: file.name,
+            conversationId: targetConversationId || undefined
+          });
+          console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
+          settle({ imageryId: result.id });
+          onImageryUploaded?.();
+          if (scenario.isLegacy) {
+            try {
+              localStorage.setItem(LAST_IMAGERY_KEY, result.id);
+            } catch {
+              // localStorage unavailable (private mode, etc.) -- refresh-persistence is a convenience, not required.
+            }
+          }
+        } catch (err) {
+          console.error('[SatQuery] Image upload to backend failed:', err);
+          settle({ imageryId: null });
+        }
+      })();
     }
   };
 
@@ -325,10 +257,12 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
     <div className="workspace-layout">
       {/* LEFT COLUMN: Large Satellite Image Viewer */}
       <div className="workspace-left">
-        <ImageViewer 
-          imageUrl={activeViewerImage} 
+        <ImageViewer
+          imageUrl={activeViewerImage}
           scenario={scenario}
           onInspectElement={(elem) => setActiveEvidenceHighlight(elem)}
+          showBBoxesDefault={false}
+          showSegmentationDefault={false}
         />
       </div>
 
@@ -362,7 +296,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
             <div>
               <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>SatQuery AI Multi-Turn Agent</div>
               <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                Active Scene: {scenario.uploadedFile?.name || scenario.title} ({scenario.sensor || '0.28m GSD'})
+                Active Scene: {scenario.uploadedFile?.name || scenario.title} ({scenario.sensor || 'Sensor unspecified'})
               </div>
             </div>
           </div>
@@ -413,10 +347,10 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                         <span className="chat-user-thumb-badge">GeoTIFF</span>
                       </div>
                       <div className="chat-attachment-info">
-                        <div className="chat-attachment-name">{msg.attachment.name || "Satellite_Scene.tif"}</div>
+                        <div className="chat-attachment-name">{msg.attachment.name || "Attached file"}</div>
                         <div className="chat-attachment-meta">
-                          <span className="meta-tag">{msg.attachment.size || "142.8 MB"}</span>
-                          <span className="meta-tag">{msg.attachment.sensor || "Cartosat-3 (0.28m)"}</span>
+                          {msg.attachment.size && <span className="meta-tag">{msg.attachment.size}</span>}
+                          {msg.attachment.sensor && <span className="meta-tag">{msg.attachment.sensor}</span>}
                           {msg.attachment.crs && <span className="meta-tag meta-crs">{msg.attachment.crs}</span>}
                         </div>
                       </div>
@@ -446,16 +380,23 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div className="isro-live-dot"></div>
                     <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--accent)' }}>
-                      {msg.taskType || 'Vision-Language Remote Sensing'}
+                      {msg.taskType || 'Analysis Request'}
                     </span>
                   </div>
 
-                  {/* Confidence Badge */}
+                  {/* Confidence Badge (only when a real score exists) or a neutral status pill */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="badge badge-high" title="Ensemble Calibrated Confidence Score">
-                      <ShieldCheck size={13} />
-                      <span>{msg.confidence}% Confidence</span>
-                    </span>
+                    {msg.confidence != null ? (
+                      <span className="badge badge-high" title="Ensemble Calibrated Confidence Score">
+                        <ShieldCheck size={13} />
+                        <span>{msg.confidence}% Confidence</span>
+                      </span>
+                    ) : msg.status ? (
+                      <span className="badge badge-high" title="Analysis job status" style={{ textTransform: 'capitalize' }}>
+                        <ShieldCheck size={13} />
+                        <span>{msg.status}</span>
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
@@ -478,16 +419,16 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                   </div>
                 )}
 
-                {/* Visual Evidence Thumbnail */}
+                {/* Attached Image Thumbnail */}
                 {msg.evidenceThumb && (
                   <div style={{ margin: '8px 0' }}>
                     <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 4, letterSpacing: '0.04em' }}>
-                      Visual Evidence Grounding (Cartosat-3 Crop)
+                      Attached Image
                     </div>
-                    <img 
-                      src={msg.evidenceThumb} 
-                      alt="Visual Evidence Grounding" 
-                      className="ai-evidence-thumb" 
+                    <img
+                      src={msg.evidenceThumb}
+                      alt="Attached satellite image"
+                      className="ai-evidence-thumb"
                       onClick={() => setActiveViewerImage(msg.evidenceThumb)}
                       title="Click to view in main satellite panel"
                     />
@@ -557,7 +498,11 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                   borderTop: '1px solid var(--border-subtle)'
                 }}>
                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                    Model: {msg.modelChain || 'Prithvi-EO'}
+                    {msg.modelChain
+                      ? `Model: ${msg.modelChain}`
+                      : msg.jobId
+                        ? `Job: ${msg.jobId.slice(0, 8)}`
+                        : ''}
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -635,7 +580,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                 </div>
                 <div className="pending-meta">
                   <span className="pending-name">{pendingAttachment.name}</span>
-                  <span className="pending-size">{pendingAttachment.size} • {pendingAttachment.sensor}</span>
+                  <span className="pending-size">{pendingAttachment.size}{pendingAttachment.sensor ? ` • ${pendingAttachment.sensor}` : ''}</span>
                 </div>
                 <button 
                   type="button" 
@@ -700,7 +645,8 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack }) {
                 className="btn btn-primary"
                 style={{ padding: '8px 16px' }}
                 onClick={() => handleSendMessage()}
-                disabled={isTyping || (!inputText.trim() && !pendingAttachment)}
+                disabled={isTyping || pendingAttachment?.uploading || (!inputText.trim() && !pendingAttachment)}
+                title={pendingAttachment?.uploading ? 'Uploading image…' : undefined}
               >
                 <Send size={15} />
                 <span>Send</span>

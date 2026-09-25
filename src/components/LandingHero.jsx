@@ -1,13 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Upload, FileUp, Sparkles, ArrowRight, CheckCircle2, 
-  Satellite, Layers, Database, Compass, Zap 
+  Upload, FileUp, Sparkles, ArrowRight, CheckCircle2,
+  Satellite, Layers, Database, Compass
 } from 'lucide-react';
 import { ChitravitsEmblem } from './ui/ChitravitsLogo';
 import { SUGGESTED_QUERIES } from '../data/mockData';
+import { uploadImagery } from '../lib/apiClient';
 
-export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
+export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUploaded }) {
   const [prompt, setPrompt] = useState('');
+  // New Chat remounts this screen; an upload still in flight from the old
+  // instance must not then navigate the user out of their new chat.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isValidating, setIsValidating] = useState(false);
@@ -36,45 +44,49 @@ export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
     }
   };
 
-  const processFile = (file) => {
+  const processFile = async (file) => {
     setIsValidating(true);
     const isImageFile = file.type?.startsWith('image/') && !file.name.endsWith('.tif') && !file.name.endsWith('.tiff');
     const previewUrl = isImageFile ? URL.createObjectURL(file) : '/assets/optical_satellite.jpg';
 
+    // sensor/crs/bands are intentionally left unset -- a plain browser file
+    // carries no real sensor or CRS metadata, and none is fabricated (see
+    // backend README "no dummy data" scope).
     const filePayload = {
       name: file.name,
       size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
       type: file.type || 'image/tiff',
-      crs: 'EPSG:4326 (WGS84)',
-      bands: 'B2, B3, B4, B8 (Multispectral)',
-      sensor: 'Cartosat-3 High-Res (0.28m GSD)',
       previewUrl: previewUrl
     };
 
-    setUploadedFile(filePayload);
-    
-    // Smooth brief parsing animation then immediately launch into conversational chat with image attached!
-    setTimeout(() => {
-      setIsValidating(false);
-      onStartAnalysis(prompt || 'Analyze this satellite scene and extract critical land-cover structures', filePayload);
-    }, 450);
-  };
+    // Real upload to Supabase Storage (bucket: Satquery) via FastAPI. This is
+    // the first persisted action of a new chat, so the conversation record is
+    // created here (titled "New Chat" -- the filename never becomes the
+    // title). The "Parsing GeoTIFF Metadata..." loading state covers these
+    // real network calls. If they fail, imageryId stays null and the chat
+    // shows the honest upload error.
+    try {
+      const conversationId = await onStartConversation();
+      const result = await uploadImagery(file, { name: file.name, conversationId });
+      console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
+      filePayload.imageryId = result.id;
+      filePayload.conversationId = conversationId;
+      onImageryUploaded?.();
+    } catch (err) {
+      console.error('[SatQuery] Image upload to backend failed:', err);
+    }
 
-  const handleSampleDemo = () => {
-    const demoPayload = {
-      name: 'Bengaluru_Cartosat3_Optical_0.28m.tif',
-      size: '142.8 MB',
-      type: 'image/tiff',
-      crs: 'EPSG:4326 (WGS84)',
-      bands: 'B2, B3, B4, B8 (Multispectral)',
-      sensor: 'Cartosat-3 (0.28m GSD) + RISAT-1A SAR',
-      previewUrl: '/assets/optical_satellite.jpg'
-    };
-    onStartAnalysis(prompt || 'Analyze the water bodies and infrastructure in this Bengaluru satellite scene', demoPayload);
+    if (!isMountedRef.current) return;
+    setUploadedFile(filePayload);
+    setIsValidating(false);
+    // Only a query the user actually typed is submitted; an upload alone
+    // opens the chat and waits for the first question.
+    onStartAnalysis(prompt, filePayload);
   };
 
   const handleAnalyze = () => {
-    onStartAnalysis(prompt || 'Analyze this satellite scene and extract critical land-cover structures', uploadedFile);
+    if (!prompt.trim() && !uploadedFile) return;
+    onStartAnalysis(prompt, uploadedFile);
   };
 
   return (
@@ -116,12 +128,13 @@ export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
             </div>
             <h3 style={{ fontSize: '1.1rem' }}>{uploadedFile.name}</h3>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-              <span className="badge badge-geotiff">GeoTIFF</span>
-              <span className="badge badge-optical">{uploadedFile.sensor}</span>
-              <span className="badge badge-high">{uploadedFile.crs}</span>
+              <span className="badge badge-geotiff">{uploadedFile.name?.split('.').pop()?.toUpperCase() || 'FILE'}</span>
+              {uploadedFile.sensor && <span className="badge badge-optical">{uploadedFile.sensor}</span>}
+              {uploadedFile.crs && <span className="badge badge-high">{uploadedFile.crs}</span>}
+              {!uploadedFile.imageryId && <span className="badge" title="Backend upload failed">Not saved to backend</span>}
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              Size: {uploadedFile.size} | Geotagged & ready for conversational query
+              Size: {uploadedFile.size} | Ready for conversational query
             </p>
           </div>
         ) : (
@@ -129,29 +142,21 @@ export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
             <div className="dropzone-icon-box">
               <Upload size={30} />
             </div>
-            <h3 style={{ fontSize: '1.2rem', marginBottom: 6 }}>
+            <h3 style={{ fontSize: '1.2rem', marginBottom: 4 }}>
               Drag & Drop your Satellite Scene here
             </h3>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: 16 }}>
-              Supports GeoTIFF, Multi-spectral TIFF, PNG, or JPEG up to 500 MB
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: 10 }}>
+              Supports GeoTIFF, Multi-spectral TIFF, PNG, or JPEG up to 50 MB
             </p>
             <div style={{ display: 'inline-flex', gap: 10 }}>
-              <button 
+              <button
                 type="button"
-                className="btn btn-secondary" 
+                className="btn btn-secondary"
                 onClick={(e) => { e.stopPropagation(); document.getElementById('satellite-file-input').click(); }}
                 title="Browse local files to upload GeoTIFF / TIFF / Satellite imagery"
               >
                 <FileUp size={16} style={{ color: 'inherit', flexShrink: 0 }} />
                 <span>Browse & Upload GeoTIFF / TIFF</span>
-              </button>
-              <button 
-                type="button" 
-                className="btn btn-outline"
-                onClick={(e) => { e.stopPropagation(); handleSampleDemo(); }}
-              >
-                <Zap size={16} />
-                Sample Demo (Bengaluru 0.28m)
               </button>
             </div>
           </div>
@@ -159,7 +164,7 @@ export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
       </div>
 
       {/* Prompt Bar Input */}
-      <div className="prompt-bar-wrapper" style={{ width: '100%', maxWidth: '780px', marginBottom: 'var(--space-5)' }}>
+      <div className="prompt-bar-wrapper" style={{ width: '100%', maxWidth: '780px', marginBottom: 'clamp(10px, 2vh, 20px)' }}>
         <div className="prompt-input-row">
           <Sparkles size={20} style={{ color: 'var(--accent)', marginLeft: 8 }} />
           <textarea
@@ -186,7 +191,7 @@ export function LandingHero({ onStartAnalysis, onLoadDemo, currentScenario }) {
       </div>
 
       {/* Suggested Query Chips */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 1.2vh, 10px)' }}>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
           Suggested Remote Sensing Inquiries
         </div>
