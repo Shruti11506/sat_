@@ -2087,3 +2087,127 @@ code, pre {
     height: 360px;
   }
 }
+
+/* Sidebar rows (UserHistorySidebar). One grid for every nav / conversation
+   row: 10px inset, 18px icon, 11px gap, so every label starts at the same x.
+   Plain CSS on purpose: the unlayered `*` reset above zeroes Tailwind's p-*
+   utilities, and the shadcn bg-sidebar-* colors aren't generated, so without
+   this the rows sat flush at x=0 with no visible hover/active state. */
+[data-sidebar="sidebar"] {
+  --sq-row-text: rgba(226, 232, 240, 0.82);
+  --sq-row-text-strong: #ffffff;
+  --sq-row-icon: #8b9bb4;
+  --sq-row-icon-active: #3b82f6;
+  --sq-row-hover-bg: rgba(59, 130, 246, 0.08);
+  --sq-row-active-bg: rgba(37, 99, 235, 0.18);
+  --sq-row-label: rgba(148, 163, 184, 0.75);
+}
+:root[data-theme="light"] [data-sidebar="sidebar"] {
+  --sq-row-text: #334155;
+  --sq-row-text-strong: #0f172a;
+  --sq-row-icon: #64748b;
+  --sq-row-icon-active: #2563eb;
+  --sq-row-hover-bg: rgba(37, 99, 235, 0.07);
+  --sq-row-active-bg: rgba(37, 99, 235, 0.12);
+  --sq-row-label: #64748b;
+}
+[data-sidebar="sidebar"] [data-sidebar="header"] {
+  padding: 10px 8px 8px;
+}
+[data-sidebar="sidebar"] [data-sidebar="content"] {
+  padding: 4px 8px;
+}
+[data-sidebar="sidebar"] [data-sidebar="footer"] {
+  padding: 8px;
+}
+[data-sidebar="sidebar"] [data-sidebar="group"] {
+  padding: 6px 0 2px;
+}
+[data-sidebar="sidebar"] [data-sidebar="group-label"] {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--sq-row-label);
+}
+[data-sidebar="sidebar"] [data-sidebar="menu"] {
+  gap: 2px;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"] {
+  height: 40px;
+  padding: 0 10px;
+  gap: 11px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--sq-row-text);
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][data-row="conversation"] {
+  height: 38px;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"] > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  stroke-width: 1.75;
+  color: var(--sq-row-icon);
+  transition: color 0.18s ease;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][data-row="conversation"] > svg {
+  width: 17px;
+  height: 17px;
+  margin: 0 0.5px;
+  flex-basis: 17px;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"]:hover,
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][data-state="open"] {
+  background-color: var(--sq-row-hover-bg);
+  color: var(--sq-row-text-strong);
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][data-active="true"] {
+  background-color: var(--sq-row-active-bg);
+  color: var(--sq-row-text-strong);
+  font-weight: 500;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"]:hover > svg,
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][data-active="true"] > svg {
+  color: var(--sq-row-icon-active);
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-button"]:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.6);
+  outline-offset: -2px;
+}
+/* Conversation rows: keep the title clear of the hover ⋯ button. */
+[data-sidebar="sidebar"] [data-sidebar="menu-item"]:has(> [data-sidebar="menu-action"]) > [data-sidebar="menu-button"] {
+  padding-right: 34px;
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-action"] {
+  top: 50%;
+  right: 6px;
+  width: 24px;
+  translate: 0 -50%;
+  color: var(--sq-row-icon);
+}
+[data-sidebar="sidebar"] [data-sidebar="menu-action"]:hover {
+  color: var(--sq-row-text-strong);
+  background-color: var(--sq-row-hover-bg);
+}
+/* Profile tile (its own inline padding): avatar row, not a nav row. */
+[data-sidebar="sidebar"] [data-sidebar="menu-button"][aria-haspopup="menu"] {
+  height: 52px;
+}
+
+/* Sidebar density (Settings → App Preferences, stamped on <html> by App.jsx).
+   Comfortable = the sizes set in UserHistorySidebar; compact only tightens row
+   heights and gaps -- the sidebar width never changes. Unlayered, so it wins
+   over the Tailwind height utilities on those rows. */
+:root[data-sidebar-density="compact"] [data-sidebar="menu"] {
+  gap: 1px;
+}
+:root[data-sidebar-density="compact"] [data-sidebar="menu-button"] {
+  height: 32px;
+}
+:root[data-sidebar-density="compact"] [data-sidebar="menu-button"][aria-haspopup="menu"] {
+  height: 44px;
+}

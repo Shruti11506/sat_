@@ -7,7 +7,7 @@ from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, StorageError, SupabaseError
 from app.db.supabase import get_supabase
 from app.schemas.imagery import ImageryCreate
-from app.services import storage_service
+from app.services import raster_service, storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ def create_imagery_from_upload(
     acquisition_date: datetime | None,
     metadata: dict[str, Any] | None,
     conversation_id: str | None = None,
+    raster: raster_service.RasterInfo | None = None,
 ) -> dict:
     """Insert the imagery metadata row after a successful Storage upload.
 
@@ -64,6 +65,12 @@ def create_imagery_from_upload(
     }
     if conversation_id:
         row["conversation_id"] = conversation_id
+    if raster:
+        # Only what the file itself carries; absent values stay NULL.
+        for column in ("latitude", "longitude", "bbox", "cloud_cover"):
+            value = getattr(raster, column)
+            if value is not None:
+                row[column] = value
 
     try:
         response = client.table(TABLE).insert(row).execute()
@@ -114,11 +121,35 @@ def get_imagery(imagery_id: str) -> dict:
     return response.data
 
 
+def has_raster_source(storage_path: str | None) -> bool:
+    """TIFF uploads are the only ones that ever get a generated thumbnail."""
+    return bool(storage_path) and storage_service.get_extension(storage_path) in storage_service.RASTER_EXTENSIONS
+
+
+def resolve_thumbnail_url(client, storage_path: str | None) -> str | None:
+    """Signed URL of the generated PNG thumbnail, or None if there isn't one
+    (non-TIFF, a record from before thumbnails, or a file that couldn't be parsed)."""
+    if not has_raster_source(storage_path):
+        return None
+    return storage_service.resolve_url(client, raster_service.thumbnail_path_for(storage_path), missing_ok=True)
+
+
+def upload_thumbnail(client, storage_path: str, png: bytes) -> bool:
+    """Best-effort: a failure leaves the upload without a thumbnail, nothing more."""
+    try:
+        storage_service.upload_file(client, raster_service.thumbnail_path_for(storage_path), png, "image/png")
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Thumbnail upload failed for %s; the original is stored and unaffected", storage_path)
+        return False
+
+
 def get_imagery_with_url(imagery_id: str) -> dict:
     row = get_imagery(imagery_id)
     client = get_supabase()
     row = dict(row)
     row["url"] = storage_service.resolve_url(client, row.get("storage_path"))
+    row["thumbnail_url"] = resolve_thumbnail_url(client, row.get("storage_path"))
     return row
 
 
@@ -159,3 +190,9 @@ def delete_imagery(imagery_id: str) -> None:
                 storage_path,
             )
             raise
+
+        if has_raster_source(storage_path):
+            try:
+                storage_service.delete_file(client, raster_service.thumbnail_path_for(storage_path))
+            except StorageError:
+                logger.error("Thumbnail for deleted imagery %s could not be removed -- orphaned file.", imagery_id)

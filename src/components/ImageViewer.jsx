@@ -4,8 +4,22 @@ import {
   Eye, EyeOff, Crosshair, Sliders, MapPin, Compass, ArrowLeft 
 } from 'lucide-react';
 
-export function ImageViewer({ 
-  imageUrl, 
+function formatLatLon(lat, lon) {
+  return `${Math.abs(lat).toFixed(4)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(4)}° ${lon >= 0 ? 'E' : 'W'}`;
+}
+
+function geoTitle(geo) {
+  const b = geo.bbox;
+  const bounds = b
+    ? `\nBounds (WGS84): W ${b.west.toFixed(4)}, S ${b.south.toFixed(4)}, E ${b.east.toFixed(4)}, N ${b.north.toFixed(4)}` +
+      (b.source_crs ? `\nFrom the file's CRS: ${b.source_crs}` : '')
+    : '';
+  return `Scene centre, read from the GeoTIFF${bounds}`;
+}
+
+export function ImageViewer({
+  imageUrl,
+  geo = null,
   scenario, 
   showBBoxesDefault = true, 
   showSegmentationDefault = true,
@@ -23,8 +37,11 @@ export function ImageViewer({
   const [layerOpacity, setLayerOpacity] = useState(70);
   const [activeBand, setActiveBand] = useState('rgb'); // 'rgb', 'false-color', 'ndwi', 'sar-overlay'
 
-  // Live Coordinates HUD
-  const [coords, setCoords] = useState({ lat: '12°58′23.4″N', lng: '77°35′45.1″E', elev: '920m' });
+  // `geo` is the real georeference the backend read from an uploaded
+  // GeoTIFF (scene centre + WGS84 bounds, reprojected from the file's own
+  // CRS). Without it the HUD says "No georeference data" -- it never shows
+  // an estimated or mouse-tracked coordinate (the old fabricated Bengaluru
+  // readout was removed per CLAUDE.md's rule against fabricated data).
   const [selectedBox, setSelectedBox] = useState(null);
 
   const containerRef = useRef(null);
@@ -45,25 +62,6 @@ export function ImageViewer({
   };
 
   const handleMouseMove = (e) => {
-    // Update live coordinates simulation based on normalized position
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const relX = (e.clientX - rect.left) / rect.width;
-      const relY = (e.clientY - rect.top) / rect.height;
-      
-      const baseLat = 12.9716;
-      const baseLng = 77.5946;
-      const calcLat = (baseLat + (0.5 - relY) * 0.05).toFixed(4);
-      const calcLng = (baseLng + (relX - 0.5) * 0.05).toFixed(4);
-      const calcElev = Math.round(910 + (relY * 25));
-      
-      setCoords({
-        lat: `${calcLat}°N`,
-        lng: `${calcLng}°E`,
-        elev: `${calcElev}m MSL`
-      });
-    }
-
     if (!isDragging) return;
     setPan({
       x: e.clientX - dragStart.x,
@@ -73,8 +71,9 @@ export function ImageViewer({
 
   const handleMouseUp = () => setIsDragging(false);
 
-  // Dynamic Scale Bar Calculation
-  const scaleMeters = Math.round(500 / zoom);
+  // No real ground-sample-distance is known without parsed GeoTIFF
+  // metadata (pixel resolution + CRS), so no scale claim is shown -- see
+  // the coordinates note above.
 
   return (
     <div 
@@ -100,12 +99,17 @@ export function ImageViewer({
               <span>Back</span>
             </button>
           )}
-          <div className="hud-pill">
-            <MapPin size={13} style={{ color: 'var(--accent)' }} />
-            <span>{coords.lat}, {coords.lng}</span>
-            <span style={{ opacity: 0.5 }}>|</span>
-            <span>{coords.elev}</span>
-          </div>
+          {geo ? (
+            <div className="hud-pill" title={geoTitle(geo)}>
+              <MapPin size={13} style={{ color: 'var(--accent)' }} />
+              <span style={{ whiteSpace: 'nowrap' }}>{formatLatLon(geo.latitude, geo.longitude)}</span>
+            </div>
+          ) : (
+            <div className="hud-pill" title="This image carries no georeference (CRS) metadata">
+              <MapPin size={13} style={{ color: 'var(--accent)', opacity: 0.5 }} />
+              <span style={{ opacity: 0.7 }}>No georeference data</span>
+            </div>
+          )}
           <div className="hud-pill" style={{ display: 'flex', gap: 6 }}>
             <span className="badge badge-optical">{scenario.sensor}</span>
             <span className="badge badge-geotiff">{scenario.resolution}</span>
@@ -291,12 +295,6 @@ export function ImageViewer({
 
         {/* Right: Zoom Controls & Scale Bar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Dynamic Scale Bar */}
-          <div className="hud-pill scale-bar-widget">
-            <div style={{ textAlign: 'center' }}>~{scaleMeters} m</div>
-            <div className="scale-bar-line"></div>
-          </div>
-
           <div className="hud-controls-group">
             <button className="hud-btn" onClick={handleZoomOut} title="Zoom Out">
               <ZoomOut size={16} />

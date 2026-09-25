@@ -160,11 +160,13 @@ def is_bucket_public(client) -> bool:
     return bool(getattr(bucket_info, "public", False))
 
 
-def resolve_url(client, storage_path: str | None) -> str | None:
+def resolve_url(client, storage_path: str | None, missing_ok: bool = False) -> str | None:
     """Resolve an accessible URL for an object, respecting bucket privacy.
 
     Returns None if storage_path is empty or resolution fails -- callers
     should treat this as optional, not a guarantee the object is reachable.
+    missing_ok: the object may legitimately not exist (e.g. a TIFF whose
+    thumbnail couldn't be generated), so a failure isn't logged as an error.
     """
     if not storage_path:
         return None
@@ -182,5 +184,8 @@ def resolve_url(client, storage_path: str | None) -> str | None:
             return result.get("signedURL") or result.get("signed_url")
         return getattr(result, "signed_url", None)
     except Exception:  # noqa: BLE001 - URL resolution is best-effort
-        logger.exception("Failed to resolve URL for %s/%s", bucket, storage_path)
+        if missing_ok:
+            logger.debug("No object to resolve a URL for at %s", storage_path)
+        else:
+            logger.exception("Failed to resolve URL for %s/%s", bucket, storage_path)
         return None

@@ -41,6 +41,14 @@ class ImageryUploadResponse(BaseModel):
     file_size: int
     conversation_id: UUID | None = None
     status: str = "registered"
+    thumbnail_url: str | None = Field(
+        default=None,
+        description="Signed URL of a generated PNG preview (TIFF/GeoTIFF uploads only).",
+    )
+    latitude: float | None = None
+    longitude: float | None = None
+    bbox: dict[str, Any] | None = None
+    cloud_cover: float | None = None
 
 
 class ImageryOut(BaseModel):
@@ -59,6 +67,10 @@ class ImageryOut(BaseModel):
     url: str | None = Field(
         default=None,
         description="Freshly-resolved signed (private bucket) or public URL, re-computed on every GET.",
+    )
+    thumbnail_url: str | None = Field(
+        default=None,
+        description="Signed URL of the PNG preview generated for a TIFF/GeoTIFF upload; null when there is none.",
     )
     cloud_cover: float | None = None
     latitude: float | None = None

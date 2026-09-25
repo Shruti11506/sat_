@@ -131,6 +131,8 @@ The `{uuid}` per upload prevents filename collisions and guarantees one user's u
 
 Since the bucket is **private**, `GET /api/v1/imagery/{id}` resolves a fresh **signed URL** (1 hour TTL) rather than a public URL — see `storage_service.resolve_url()`, which checks `get_bucket().public` and switches to a public URL automatically if the bucket's privacy is ever changed. The bucket itself is never made public by this backend.
 
+**TIFF/GeoTIFF uploads** are also read with rasterio (`services/raster_service.py`; the PyPI wheel bundles GDAL/PROJ, so no system packages): a downscaled PNG preview (long edge ≤ 1024 px; true colour when RGB / Sentinel-2 B4-B3-B2 bands are identifiable, otherwise grayscale, 2–98 % stretch for non-8-bit data, nodata transparent) is stored at `imagery/{uuid}/thumbnail.png`, and the file's real footprint is reprojected to WGS84 into `latitude`/`longitude` (scene centre) and `bbox` = `{west, south, east, north, crs: "EPSG:4326", source_crs}`. `cloud_cover` is set only from a real metadata tag (`CLOUD_COVERAGE_ASSESSMENT`, `CLOUDY_PIXEL_PERCENTAGE`, …). Anything the file doesn't carry stays null, and a file rasterio can't parse still uploads normally, just without these extras. Measured: 0.65 s for a 26.6 MB, 105-megapixel int16 raster, so it runs inside the request (in a worker thread) with no queue.
+
 ### Row Level Security
 
 The backend connects with the `service_role` (`SUPABASE_SECRET_KEY`), which always bypasses RLS, so RLS doesn't affect FastAPI ↔ Supabase. Migration `0004_profile_analytics.sql` **enables RLS on every table** with no policies for `anon`/`authenticated`, and revokes `profile_dashboard()` from those roles — the frontend never talks to Supabase directly, so they get zero access (verified: the publishable key reads 0 rows and gets `42501` on the function).
@@ -165,7 +167,7 @@ The `/health/*` connectivity checks are the exception — they put status in `da
 | POST | `/api/v1/imagery/upload` | **Real upload**: multipart file → Supabase Storage (`Satquery` bucket) → `imagery` row. Optional form field `conversation_id`. Used by the frontend. |
 | POST | `/api/v1/imagery` | Register imagery metadata only (no file) — for a file already placed in Storage some other way |
 | GET | `/api/v1/imagery?page=1&page_size=20` | List imagery (paginated, from the database — never scans Storage) |
-| GET | `/api/v1/imagery/{imagery_id}` | Get one imagery record, with a freshly-resolved signed/public `url` |
+| GET | `/api/v1/imagery/{imagery_id}` | Get one imagery record, with a freshly-resolved signed/public `url` (and `thumbnail_url` for a TIFF/GeoTIFF that got a generated PNG preview, else null) |
 | DELETE | `/api/v1/imagery/{imagery_id}` | Deletes the DB record first, then the Storage object (see note below). |
 | POST | `/api/v1/analysis` | Create an analysis job (**no AI inference**) — validates `imagery_id` exists and `query` is non-empty; optional `conversation_id` |
 | GET | `/api/v1/analysis/history?limit=50` | `analysis_jobs` joined with `imagery`, most recent first — the sidebar's sole data source |
@@ -179,6 +181,8 @@ The `/health/*` connectivity checks are the exception — they put status in `da
 | GET | `/api/v1/profile/activity?period=year`, `/insights`, `/features`, `/recent-activity` | Slices of the dashboard |
 
 Error codes added by the upload flow: `UNSUPPORTED_FILE_TYPE`, `EMPTY_FILE`, `FILE_TOO_LARGE`, `MISSING_FILENAME`, `INVALID_METADATA` (422), `STORAGE_UPLOAD_FAILED` (500, upload itself failed — no DB record is created), `INVALID_QUERY` (422, empty/whitespace-only query on `/analysis`). Conversations add `CONVERSATION_NOT_FOUND` (404) and `INVALID_TITLE` (422). The conversation endpoints need migration `supabase/migrations/0003_conversations.sql`.
+
+**Settings endpoints** (`GET /api/v1/settings`, `PATCH /api/v1/settings` with only the changed flat fields, e.g. `{"theme": "system", "notify_product_updates": true}`) need migration `supabase/migrations/0005_user_settings.sql` (else 503 `SCHEMA_NOT_MIGRATED`). Values are validated against the same lists as the table's CHECK constraints, and unknown fields (including any `user_id`/`profile_id`) are rejected with 422 `VALIDATION_ERROR`. The row is created with defaults on first read. Profile fields are edited through `/profile`, not here.
 
 **Profile endpoints** need migration `supabase/migrations/0004_profile_analytics.sql` (until then they return 503 `SCHEMA_NOT_MIGRATED`, and the page shows that message with Retry). Identity: no login in this prototype — exactly one workspace profile (a unique index enforces it), resolved server-side by `profile_service.get_current_profile`; no endpoint accepts a user id. Aggregation runs in Postgres (`profile_dashboard()`, one RPC); Python only derives streaks and keyword categories (`services/usage_classifier.py` — deterministic, not a model: task from the query text, data type from filename/sensor/source, with JPEG/PNG/WEBP defaulting to Optical / RGB). Days are bucketed in the profile's `timezone`, else `APP_TIMEZONE` (default `Asia/Kolkata`); the current streak survives until today ends. Errors: `INVALID_DISPLAY_NAME`, `INVALID_USERNAME`, `INVALID_HEADLINE`, `INVALID_BIO` (422), avatar reuses `UNSUPPORTED_FILE_TYPE` / `EMPTY_FILE` / `FILE_TOO_LARGE`.
 

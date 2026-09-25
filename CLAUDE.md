@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 For the full, evidence-backed audit (feature inventory, bug table, dummy-data locations, production readiness, roadmap), see [PROJECT_STATUS.md](PROJECT_STATUS.md). Backend setup and endpoint reference: [backend/README.md](backend/README.md). The root `README.md` is still Vite boilerplate — ignore it.
 
+> **AI layer / ML model integration in progress:** read [docs/ai-integration/HANDOFF.md](docs/ai-integration/HANDOFF.md) FIRST — current state, the two models (EarthMind, MCD-Mamba), the backend↔model-server protocol, and the ordered task list. Draft reference code is in `docs/ai-integration/reference/` (adapt, don't paste blindly).
+
 ## Commands
 
 ```bash
@@ -24,7 +26,7 @@ cd backend
 python -m venv .venv && .venv\Scripts\activate           # first time (Windows; source .venv/bin/activate elsewhere)
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000                  # http://localhost:8000/docs
-pytest -v                                                  # 117 tests + test_orchestrator.py (needs langgraph in the venv), in-memory fake Supabase (incl. an rpc() mirror of profile_dashboard), no network
+pytest -v                                                  # 130 tests + test_orchestrator.py (needs langgraph in the venv), in-memory fake Supabase (incl. an rpc() mirror of profile_dashboard), no network
 pytest tests/test_imagery_upload.py::test_upload_imagery_success -v   # single test
 docker compose up --build                                  # UNVERIFIED: never successfully run on this machine
 ```
@@ -62,7 +64,7 @@ src/components/ui/          shadcn primitives, logo, animated background
 src/data/mockData.js        SATELLITE_SCENARIOS (legacy screens only) + SUGGESTED_QUERIES (UI chips)
 backend/app/main.py         app init, CORS, exception handlers, routers under /api/v1
 backend/app/api/routes/     health, imagery, analysis, jobs, results, evidence (thin)
-backend/app/services/       imagery_, analysis_, job_, result_, storage_service (all logic)
+backend/app/services/       imagery_, analysis_, job_, result_, storage_, raster_service (all logic)
 backend/app/schemas/        Pydantic models incl. the ApiResponse envelope (common.py)
 backend/app/db/supabase.py  single cached Supabase client (service-role key)
 backend/app/core/           config (env), exceptions, logging, security
@@ -79,6 +81,7 @@ Dead code (unreachable from `src/main.jsx`; don't build on it): `src/components/
 
 - `landing` → [LandingHero.jsx](src/components/LandingHero.jsx) — real upload entry point (drag-drop or browse)
 - `workspace` → [Workspace.jsx](src/components/Workspace.jsx) — main chat + image viewer, backend-driven
+- `settings` → [SettingsPage.jsx](src/components/SettingsPage.jsx) — Profile / App Preferences / Notifications / Account & Privacy, from `GET /settings` held in `App.settingsState`; selects and toggles save immediately (optimistic, reverted on failure), profile uses the existing `/profile` endpoints with a Save button. Opened from the sidebar's "Settings & Appearance" and the profile menu's "Settings"; reopens on refresh.
 - `profile` → [ProfileDashboard.jsx](src/components/ProfileDashboard.jsx) — profile/analytics page from `GET /profile/dashboard` (one request) with an Edit Profile dialog; opened from the sidebar footer menu's "Profile" item. `localStorage['satquery-last-screen'] = 'profile'` reopens it on refresh.
 - `viewer` → [ImageViewer.jsx](src/components/ImageViewer.jsx) (effectively unreachable, see above)
 - `change` / `fusion` / `pipeline` / `analytics` / `report` → [ChangeDetection.jsx](src/components/ChangeDetection.jsx) / [FusionViewer.jsx](src/components/FusionViewer.jsx) / [AgentPipeline.jsx](src/components/AgentPipeline.jsx) / [AnalyticsDashboard.jsx](src/components/AnalyticsDashboard.jsx) / [ReportScreen.jsx](src/components/ReportScreen.jsx) — **pre-existing demo screens, out of scope for the backend-persistence milestone**, still rendering entirely from `SATELLITE_SCENARIOS` mock data. Reachable via the "Compare"/"Full Report" buttons in Workspace's header and several sidebar shortcuts (Images, Plugins, Deep research, See plans and pricing, Help & Mission Guide).
@@ -95,6 +98,7 @@ Screens navigate via callback props (`onNavigateScreen`, `onGoBack`) passed down
 - [UserHistorySidebar.tsx](src/components/UserHistorySidebar.tsx) fetches `GET /conversations` + `GET /analysis/history` on mount and on every `refreshToken` bump. Jobs with `conversation_id = NULL` are **legacy** (pre-conversation) chats: shown one per image, titled by their first query, read-only, opened via `App.handleSelectHistoryItem`. Conversations get a hover ⋯ menu (Rename inline / Delete with confirm — deletes its jobs, imagery rows and Storage files). Empty → "No conversations yet.", failure → "Unable to load conversation history." + Retry (re-runs the same two GETs; creates nothing); never sample data. The sidebar renders **only** backend rows — there is no frontend-only "New Chat" placeholder (it was removed because it duplicated the real record New Chat creates); the open conversation is highlighted on both the landing and workspace screens.
 - Refresh persistence: `localStorage['satquery-last-conversation-id']` (or, for legacy chats, `satquery-last-imagery-id`) holds only a pointer — on mount `App.jsx` re-fetches from the backend (`buildConversationScenario()` / `buildLegacyScenario()`); a stale pointer is cleared.
 - An upload with no typed query submits nothing (no default query is invented); the chat waits for the user's first question.
+- **Settings** (migration `0005`, `user_settings`, one row per profile, created lazily with defaults): theme (`dark`/`light`/`system`) and sidebar density are applied by `App.jsx` (`data-theme` / `data-sidebar-density` on `<html>`; compact rules at the end of `index.css`); the header sun/moon toggle saves the theme too. `localStorage` keeps only a copy for the first paint. Notification/privacy toggles and the default data type / analysis task are stored only — nothing sends notifications, and no screen offers a per-analysis data type/task choice yet, so the defaults are not applied to queries. Sign Out and Delete Account are shown but unavailable (no auth).
 - **Profile / identity** (migration `0004`): no login — the SIH prototype has ONE workspace profile (`profiles`, singleton index), resolved server-side by `profile_service.get_current_profile`; routes never take a user id, and all conversations/imagery/jobs belong to it. The sidebar footer shows it (`App.profileUser`, from `GET /profile`), or a neutral "Profile" if unavailable — never a placeholder name. Analytics are aggregated in Postgres by `profile_dashboard()` (one RPC); task/data-type labels come from `services/usage_classifier.py` (keywords, not a model). Real multi-user auth later = `user_id` columns + `auth.uid()` policies + swap `get_current_profile`.
 - `SUGGESTED_QUERIES` (landing chips) and `QUICK_SUGGESTIONS` (Workspace pills) are legitimate static UI copy — clicking them submits through the real flow.
 
@@ -127,9 +131,10 @@ Dual dark/light theme toggled via a `data-theme` attribute on `<html>`, persiste
 
 ### Database & storage notes
 
-- Tables: `profiles` (single row), `conversations`, `imagery`, `analysis_jobs` (FK `imagery_id` → `imagery.id`, enforced; both have nullable `conversation_id` → `conversations.id`), `analysis_results`, `evidence`, `audit_logs` (never written). Schema source of truth: `backend/supabase/schema.sql`; changes go in a new numbered file under `backend/supabase/migrations/` and are applied **manually** in the Supabase SQL editor — there is no migration runner, and the app has no way to run DDL.
+- Tables: `profiles` (single row), `user_settings` (one per profile), `conversations`, `imagery`, `analysis_jobs` (FK `imagery_id` → `imagery.id`, enforced; both have nullable `conversation_id` → `conversations.id`), `analysis_results`, `evidence`, `audit_logs` (never written). Schema source of truth: `backend/supabase/schema.sql`; changes go in a new numbered file under `backend/supabase/migrations/` and are applied **manually** in the Supabase SQL editor — there is no migration runner, and the app has no way to run DDL.
 - **RLS is enabled on all tables** by migration `0004` with no policies, so the anon/publishable key reads nothing (verified); `profile_dashboard()` is executable by `service_role` only. The backend uses the service-role key, which bypasses RLS. A new table needs `enable row level security` too.
 - Uploads: `imagery/{uuid4}/{original filename}`; DB row only after a successful Storage upload; delete is DB-row-first then Storage object (the `analysis_jobs` FK can block the DB delete, and Storage-first would orphan the row). Private bucket → `GET /imagery/{id}` returns a fresh 1-hour signed `url`.
+- TIFF/GeoTIFF uploads (`services/raster_service.py`, rasterio -- its wheel bundles GDAL/PROJ, no system packages): parsed in a worker thread BEFORE the Storage upload; the row gets real `latitude`/`longitude` (scene centre) and `bbox` (`{west,south,east,north,crs:"EPSG:4326",source_crs}`) reprojected from the file's CRS, `cloud_cover` only from a real metadata tag; then, after the DB insert (best-effort, so a failed insert can't orphan it), a PNG preview (long edge ≤ 1024) goes to `imagery/{uuid}/thumbnail.png`. No column records it: `thumbnail_url` (upload response, `GET /imagery/{id}`, conversation detail) is signed only for `.tif/.tiff` rows and is null when the object doesn't exist -- Supabase refuses to sign a missing object. Unparseable file / no CRS → the upload still succeeds, those fields stay null. Delete also removes the thumbnail. Frontend: `filePreview.getImageryPreviewUrl()` (thumbnail → browser-decodable original → placeholder, never the raw .tif URL) and `getImageryGeo()` feed ImageViewer's HUD.
 - `MAX_UPLOAD_SIZE_MB=50` mirrors Supabase's platform default; the project's real limit is a dashboard setting not visible via the API.
 
 ### Environment
@@ -148,7 +153,7 @@ Dual dark/light theme toggled via a `data-theme` attribute on `<html>`, persiste
 
 1. The service-role key was written to plaintext DEBUG logs before the `hpack` logging fix — rotate it as a precaution.
 2. ~~RLS disabled~~ — enabled by migration 0004.
-3. TIFF/GeoTIFF uploads show the stock `/assets/optical_satellite.jpg` as the preview (`LandingHero.jsx`, `Workspace.jsx`), and a broken image after reload — the file itself is stored correctly.
+3. ~~TIFF previews~~ — server-side thumbnails + real coordinates (see Database & storage notes). TIFFs uploaded before this, or unparseable ones, show the honest "Preview unavailable" placeholder. Thumbnails of small rasters (e.g. 120 px BigEarthNet patches) are not upscaled, so they render small in the viewer.
 4. `ImageViewer` overlays fabricated Bengaluru coordinates/elevation/scale and CSS "NDWI/SAR" filters on real uploads.
 5. No auth (by design for the SIH demo): one workspace profile, history is global. The old hardcoded "Shruti Daware" footer is gone.
 6. No compensating Storage delete if the DB insert fails after an upload (`routes/imagery.py`).

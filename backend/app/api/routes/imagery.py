@@ -11,6 +11,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Query, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.core.exceptions import ValidationAppError
@@ -23,7 +24,7 @@ from app.schemas.imagery import (
     ImageryOut,
     ImageryUploadResponse,
 )
-from app.services import conversation_service, imagery_service, storage_service
+from app.services import conversation_service, imagery_service, raster_service, storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,13 @@ async def upload_imagery(
         len(content),
     )
 
+    # TIFF/GeoTIFF: real thumbnail + georeference read from the file, before
+    # anything is stored, in a worker thread (CPU-bound). None when it can't be
+    # parsed -- the upload then proceeds exactly as for any other file.
+    raster = None
+    if imagery_service.has_raster_source(storage_path):
+        raster = await run_in_threadpool(raster_service.extract, content)
+
     # If this raises, no database record is created -- see storage_service.upload_file.
     storage_service.upload_file(client, storage_path, content, resolved_content_type)
 
@@ -103,9 +111,15 @@ async def upload_imagery(
         acquisition_date=acquisition_date,
         metadata=parsed_metadata,
         conversation_id=str(conversation_id) if conversation_id else None,
+        raster=raster,
     )
     if conversation_id:
         conversation_service.touch(str(conversation_id))
+
+    # Last, so a failed DB insert above can't leave an orphaned thumbnail too.
+    thumbnail_url = None
+    if raster and raster.thumbnail_png and imagery_service.upload_thumbnail(client, storage_path, raster.thumbnail_png):
+        thumbnail_url = imagery_service.resolve_thumbnail_url(client, storage_path)
 
     return ApiResponse.ok(
         ImageryUploadResponse(
@@ -117,6 +131,11 @@ async def upload_imagery(
             mime_type=row["mime_type"],
             file_size=row["file_size"],
             conversation_id=row.get("conversation_id"),
+            thumbnail_url=thumbnail_url,
+            latitude=row.get("latitude"),
+            longitude=row.get("longitude"),
+            bbox=row.get("bbox"),
+            cloud_cover=row.get("cloud_cover"),
         )
     )
 

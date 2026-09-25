@@ -95,6 +95,12 @@ export interface ImageryUploadResult {
   mime_type: string;
   file_size: number;
   status: string;
+  /** TIFF/GeoTIFF only: signed URL of the generated PNG preview, and georeference read from the file. */
+  thumbnail_url?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  bbox?: Record<string, unknown> | null;
+  cloud_cover?: number | null;
 }
 
 export interface ImageryRecord extends ImageryPayload {
@@ -105,6 +111,8 @@ export interface ImageryRecord extends ImageryPayload {
   file_size: number | null;
   /** Freshly-resolved signed (private bucket) or public URL. Re-fetch via getImagery() rather than caching. */
   url: string | null;
+  /** Signed URL of the PNG preview generated for a TIFF/GeoTIFF; null when there is none. */
+  thumbnail_url?: string | null;
   created_at: string;
 }
 
@@ -423,4 +431,82 @@ export function uploadProfileAvatar(file: File) {
 
 export function removeProfileAvatar() {
   return request<ProfileUser>("/profile/avatar", { method: "DELETE" });
+}
+
+// ---- Settings --------------------------------------------------------------------
+// Stored per profile in user_settings (migration 0005); the backend resolves
+// the profile itself. Profile fields are edited with updateProfile().
+
+export type ThemePreference = "dark" | "light" | "system";
+export type SidebarDensity = "comfortable" | "compact";
+export type DefaultDataType = "optical_rgb" | "multispectral" | "sar" | "optical_sar";
+export type DefaultAnalysisTask =
+  | "scene_description"
+  | "vqa"
+  | "change_analysis"
+  | "water_body_analysis"
+  | "land_cover_analysis";
+
+export interface UserSettings {
+  profile: { display_name: string; username: string; avatar_url: string | null; bio: string | null };
+  preferences: {
+    theme: ThemePreference;
+    language: "en";
+    sidebar_density: SidebarDensity;
+    default_data_type: DefaultDataType;
+    default_analysis_task: DefaultAnalysisTask;
+  };
+  notifications: { analysis_completion: boolean; product_updates: boolean; usage_alerts: boolean };
+  privacy: { save_analysis_results: boolean; share_usage_analytics: boolean };
+  updated_at: string | null;
+}
+
+/** PATCH body: flat column names, only what changed. */
+export interface SettingsChanges {
+  theme?: ThemePreference;
+  language?: "en";
+  sidebar_density?: SidebarDensity;
+  default_data_type?: DefaultDataType;
+  default_analysis_task?: DefaultAnalysisTask;
+  notify_analysis_completion?: boolean;
+  notify_product_updates?: boolean;
+  notify_usage_alerts?: boolean;
+  save_analysis_results?: boolean;
+  share_usage_analytics?: boolean;
+}
+
+export function getSettings() {
+  return request<UserSettings>("/settings");
+}
+
+export function updateSettings(changes: SettingsChanges) {
+  return request<UserSettings>("/settings", { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+const SETTINGS_SECTION: Record<keyof SettingsChanges, [keyof UserSettings, string]> = {
+  theme: ["preferences", "theme"],
+  language: ["preferences", "language"],
+  sidebar_density: ["preferences", "sidebar_density"],
+  default_data_type: ["preferences", "default_data_type"],
+  default_analysis_task: ["preferences", "default_analysis_task"],
+  notify_analysis_completion: ["notifications", "analysis_completion"],
+  notify_product_updates: ["notifications", "product_updates"],
+  notify_usage_alerts: ["notifications", "usage_alerts"],
+  save_analysis_results: ["privacy", "save_analysis_results"],
+  share_usage_analytics: ["privacy", "share_usage_analytics"],
+};
+
+/** The settings as they will look once `changes` are saved (for optimistic UI). */
+export function applySettingsChanges(settings: UserSettings, changes: SettingsChanges): UserSettings {
+  const next = {
+    ...settings,
+    preferences: { ...settings.preferences },
+    notifications: { ...settings.notifications },
+    privacy: { ...settings.privacy },
+  };
+  (Object.keys(changes) as Array<keyof SettingsChanges>).forEach((key) => {
+    const [section, field] = SETTINGS_SECTION[key];
+    (next[section] as Record<string, unknown>)[field] = changes[key];
+  });
+  return next;
 }
