@@ -112,7 +112,7 @@ function planLabel(plan?: string | null): string {
 // place of a profile that hasn't loaded -- no placeholder identity.
 function ProfileAvatar({ user, className }: { user?: ProfileUser | null; className: string }) {
   return (
-    <div className={`${className} rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm overflow-hidden`}>
+    <div className={`${className} rounded-full bg-blue-600 text-white font-semibold flex items-center justify-center shrink-0 shadow-sm overflow-hidden`}>
       {user?.avatar_url
         ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
         : user ? initialsOf(user.display_name) : <User className="w-3.5 h-3.5" />}
@@ -365,39 +365,6 @@ export function UserHistorySidebar({
   const [isProfileMenuOpen, setIsProfileMenuOpen] = React.useState(false)
   const profileTriggerRef = React.useRef<HTMLButtonElement>(null)
   const profileMenuRef = React.useRef<HTMLDivElement>(null)
-  const [profileMenuPos, setProfileMenuPos] = React.useState<{ top: number; left: number } | null>(null)
-
-  // Portaled to <body> and positioned to the right of the trigger's rect -- the
-  // sidebar's scroll container (overflow-auto) would otherwise clip an in-flow popup.
-  const PROFILE_MENU_WIDTH = 225
-  const PROFILE_MENU_HEIGHT = 205
-  const PROFILE_MENU_GAP = 10
-
-  const updateProfileMenuPos = React.useCallback(() => {
-    const rect = profileTriggerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    let left = rect.right + PROFILE_MENU_GAP
-    let top = rect.bottom - PROFILE_MENU_HEIGHT
-    if (left + PROFILE_MENU_WIDTH > window.innerWidth - 8) left = window.innerWidth - PROFILE_MENU_WIDTH - 8
-    if (left < 8) left = 8
-    if (top < 8) top = 8
-    if (top + PROFILE_MENU_HEIGHT > window.innerHeight - 8) top = window.innerHeight - PROFILE_MENU_HEIGHT - 8
-    setProfileMenuPos({ top, left })
-  }, [])
-
-  React.useLayoutEffect(() => {
-    if (!isProfileMenuOpen) {
-      setProfileMenuPos(null)
-      return
-    }
-    updateProfileMenuPos()
-    window.addEventListener("resize", updateProfileMenuPos)
-    window.addEventListener("scroll", updateProfileMenuPos, true)
-    return () => {
-      window.removeEventListener("resize", updateProfileMenuPos)
-      window.removeEventListener("scroll", updateProfileMenuPos, true)
-    }
-  }, [isProfileMenuOpen, updateProfileMenuPos])
 
   React.useEffect(() => {
     if (!isProfileMenuOpen) return
@@ -686,109 +653,116 @@ export function UserHistorySidebar({
             </SidebarMenuButton>
           </SidebarMenuItem>
 
-          {/* User Profile Tile */}
+          {/* User Profile Tile + its menu, which opens upward from it (anchored,
+              not portaled): it stays inside the sidebar at any width/height.
+              Spacing uses inline px / arbitrary px sizes on purpose: the global
+              `* { margin: 0; padding: 0 }` reset in index.css is unlayered, so
+              it overrides Tailwind's padding/margin utilities (p-*, m-*), and
+              rem sizes follow a 15px root. */}
           <SidebarMenuItem className="mt-2 pt-2 border-t border-sidebar-border/40">
-            <SidebarMenuButton
-              ref={profileTriggerRef}
-              data-state={isProfileMenuOpen ? "open" : "closed"}
-              isActive={activeScreen === "profile"}
-              onClick={() => setIsProfileMenuOpen((open) => !open)}
-              className="w-full justify-between gap-3 h-12 hover:bg-sidebar-accent rounded-lg p-2"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <ProfileAvatar user={profileUser} className="w-7 h-7" />
-                <div className="flex flex-col items-start min-w-0 leading-tight">
-                  <span className="text-sm font-semibold text-sidebar-foreground truncate max-w-full">
+            <div className="relative">
+              <SidebarMenuButton
+                ref={profileTriggerRef}
+                data-state={isProfileMenuOpen ? "open" : "closed"}
+                isActive={activeScreen === "profile"}
+                aria-haspopup="menu"
+                aria-expanded={isProfileMenuOpen}
+                onClick={() => setIsProfileMenuOpen((open) => !open)}
+                style={{ padding: "0 8px" }}
+                className="h-[48px] w-full gap-[10px] rounded-lg hover:bg-sidebar-accent"
+              >
+                <ProfileAvatar user={profileUser} className="h-[32px] w-[32px] text-[12px]" />
+                <div className="flex min-w-0 flex-1 flex-col justify-center">
+                  <span className="truncate text-[15px] font-semibold leading-5 text-sidebar-foreground">
                     {profileUser?.display_name ?? "Profile"}
                   </span>
                   {profileUser && (
-                    <span className="text-[0.72rem] text-sidebar-foreground/60 truncate max-w-full">
+                    <span className="truncate text-[12px] leading-4 text-sidebar-foreground/60">
                       {planLabel(profileUser.plan)}
                     </span>
                   )}
                 </div>
-              </div>
-              <MoreHorizontal className="w-4 h-4 opacity-60 shrink-0" />
-            </SidebarMenuButton>
+                <span className="flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60" aria-hidden="true">
+                  <MoreHorizontal className="h-[16px] w-[16px]" />
+                </span>
+              </SidebarMenuButton>
+
+              {isProfileMenuOpen && (
+                // Spans the trigger minus 6px each side, 10px above it; never
+                // leaves the sidebar. Fixed dark surface, as before.
+                <div
+                  ref={profileMenuRef}
+                  role="menu"
+                  aria-label="Account"
+                  style={{ left: 6, right: 6, bottom: "calc(100% + 10px)", padding: 6 }}
+                  className="absolute z-50 flex max-h-[calc(100svh-5rem)] flex-col overflow-y-auto rounded-[11px] border border-[rgba(59,130,246,0.18)] bg-[#080d18] shadow-[0_14px_32px_rgba(0,0,0,0.5),0_0_24px_rgba(59,130,246,0.06)] animate-in fade-in-0 slide-in-from-bottom-1 duration-150"
+                >
+                  <div className="flex items-center gap-[12px]" style={{ padding: "10px 8px" }}>
+                    <ProfileAvatar user={profileUser} className="h-[36px] w-[36px] text-[13px]" />
+                    <div className="flex min-w-0 flex-col">
+                      <span className="truncate text-[15px] font-semibold leading-[20px] text-white">
+                        {profileUser?.display_name ?? "Profile"}
+                      </span>
+                      {profileUser && (
+                        <span className="truncate text-[12.5px] leading-[16px] text-[#8fa3bf]" style={{ marginTop: 2 }}>
+                          @{profileUser.username}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="h-px shrink-0 bg-[rgba(255,255,255,0.08)]" style={{ margin: "4px -6px" }} />
+
+                  {[
+                    {
+                      label: "Profile",
+                      icon: <User className="h-[16px] w-[16px] text-[#cbd5e1]" />,
+                      onSelect: () => {
+                        onOpenProfile?.()
+                        if (isMobile) setOpenMobile(false)
+                      }
+                    },
+                    { label: "Settings", icon: <Settings className="h-[16px] w-[16px] text-[#cbd5e1]" />, onSelect: onToggleTheme },
+                    {
+                      label: "Upgrade Plan",
+                      icon: <Sparkles className="h-[16px] w-[16px] text-blue-400" />,
+                      onSelect: () => onNavigateScreen("report")
+                    }
+                  ].map(({ label, icon, onSelect }) => (
+                    <button
+                      key={label}
+                      role="menuitem"
+                      style={{ padding: "0 8px" }}
+                      className="flex h-[44px] w-full shrink-0 items-center gap-[11px] rounded-md text-left text-[14px] leading-[20px] text-[#e5e7eb] transition-colors duration-150 hover:bg-[rgba(255,255,255,0.04)] focus-visible:bg-[rgba(255,255,255,0.04)] focus-visible:outline-none"
+                      onClick={() => {
+                        setIsProfileMenuOpen(false)
+                        onSelect()
+                      }}
+                    >
+                      <span className="flex w-[20px] shrink-0 justify-center">{icon}</span>
+                      <span>{label}</span>
+                    </button>
+                  ))}
+
+                  <div className="h-px shrink-0 bg-[rgba(255,255,255,0.08)]" style={{ margin: "4px -6px" }} />
+
+                  <button
+                    role="menuitem"
+                    style={{ padding: "0 8px" }}
+                    className="flex h-[44px] w-full shrink-0 items-center gap-[11px] rounded-md text-left text-[14px] leading-[20px] text-[#ef4444] transition-colors duration-150 hover:bg-[rgba(239,68,68,0.08)] focus-visible:bg-[rgba(239,68,68,0.08)] focus-visible:outline-none"
+                    onClick={() => setIsProfileMenuOpen(false)}
+                  >
+                    <span className="flex w-[20px] shrink-0 justify-center">
+                      <LogOut className="h-[16px] w-[16px] text-[#ef4444]" />
+                    </span>
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
-
-      {isProfileMenuOpen && profileMenuPos && createPortal(
-        <div
-          ref={profileMenuRef}
-          role="menu"
-          style={{ top: profileMenuPos.top, left: profileMenuPos.left }}
-          className="fixed z-[9999] flex w-[225px] flex-col rounded-[9px] border border-[rgba(148,163,184,0.16)] bg-[#080d18] p-1.5 shadow-[0_10px_25px_rgba(0,0,0,0.35)] animate-in fade-in-0 slide-in-from-left-1 duration-150"
-        >
-          <div className="flex items-center gap-2.5 px-2.5 py-2.5">
-            <ProfileAvatar user={profileUser} className="w-8 h-8" />
-            <div className="flex flex-col items-start min-w-0 leading-tight">
-              <span className="text-[13px] font-semibold text-white truncate max-w-full">
-                {profileUser?.display_name ?? "Profile"}
-              </span>
-              {profileUser && (
-                <span className="text-[11px] text-[#94a3b8] truncate max-w-full">
-                  @{profileUser.username}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="my-1 border-t border-[rgba(148,163,184,0.12)]" />
-
-          <div className="flex flex-col gap-0.5 py-1">
-            <button
-              role="menuitem"
-              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
-              onClick={() => {
-                setIsProfileMenuOpen(false)
-                onOpenProfile?.()
-                if (isMobile) setOpenMobile(false)
-              }}
-            >
-              <User className="w-4 h-4 text-[#cbd5e1]" />
-              <span>Profile</span>
-            </button>
-            <button
-              role="menuitem"
-              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
-              onClick={() => {
-                setIsProfileMenuOpen(false)
-                onToggleTheme()
-              }}
-            >
-              <Settings className="w-4 h-4 text-[#cbd5e1]" />
-              <span>Settings</span>
-            </button>
-            <button
-              role="menuitem"
-              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
-              onClick={() => {
-                setIsProfileMenuOpen(false)
-                onNavigateScreen("report")
-              }}
-            >
-              <Sparkles className="w-4 h-4 text-blue-400" />
-              <span>Upgrade Plan</span>
-            </button>
-          </div>
-
-          <div className="my-1 border-t border-[rgba(148,163,184,0.12)]" />
-
-          <div className="py-1">
-            <button
-              role="menuitem"
-              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#ef4444] transition-colors duration-150 hover:bg-red-500/[0.08]"
-              onClick={() => setIsProfileMenuOpen(false)}
-            >
-              <LogOut className="w-4 h-4 text-[#ef4444]" />
-              <span>Sign Out</span>
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
     </Sidebar>
   )
 }
