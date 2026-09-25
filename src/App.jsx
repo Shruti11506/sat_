@@ -9,6 +9,7 @@ import { FusionViewer } from './components/FusionViewer';
 import { AgentPipeline } from './components/AgentPipeline';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { ReportScreen } from './components/ReportScreen';
+import { ProfileDashboard } from './components/ProfileDashboard';
 import { GradientBackground } from './components/ui/oceanic-shimmer';
 import { SATELLITE_SCENARIOS } from './data/mockData';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
@@ -19,13 +20,24 @@ import {
   getAnalysisHistory,
   createConversation,
   getConversation,
-  generateConversationTitle
+  generateConversationTitle,
+  getProfile
 } from './lib/apiClient';
 
 // Legacy pointer: chats created before conversations existed are keyed by imagery.
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
 // Pointer only (never data) to the open conversation, re-fetched on refresh.
 const LAST_CONVERSATION_KEY = 'satquery-last-conversation-id';
+// Set only while the profile screen is open, so a refresh reopens it.
+const LAST_SCREEN_KEY = 'satquery-last-screen';
+
+function readPointer(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
 function rememberPointer(key, value) {
   try {
@@ -156,8 +168,9 @@ export function App() {
     return localStorage.getItem('satquery-theme') || 'dark';
   });
 
-  // Active Screen state: default to 'landing'
-  const [activeScreen, setActiveScreen] = useState('landing');
+  // Active Screen state: 'landing', or the profile screen if it was open before a refresh.
+  const initialScreenRef = useRef(readPointer(LAST_SCREEN_KEY) === 'profile' ? 'profile' : 'landing');
+  const [activeScreen, setActiveScreen] = useState(initialScreenRef.current);
   // Navigation history stack for step-by-step back navigation
   const [historyStack, setHistoryStack] = useState([]);
 
@@ -295,6 +308,20 @@ export function App() {
       .catch((err) => console.error('[SatQuery] Could not generate conversation title:', err));
   }, [bumpHistory, openConversation]);
 
+  // The single workspace profile (GET /profile) shown in the sidebar footer.
+  // null until loaded, or if the backend can't provide it -- never a made-up user.
+  const [profileUser, setProfileUser] = useState(null);
+
+  useEffect(() => {
+    getProfile()
+      .then(({ user }) => setProfileUser(user))
+      .catch((err) => console.error('[SatQuery] Could not load profile:', err));
+  }, []);
+
+  useEffect(() => {
+    rememberPointer(LAST_SCREEN_KEY, activeScreen === 'profile' ? 'profile' : null);
+  }, [activeScreen]);
+
   // Sync theme with HTML data-theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -305,6 +332,11 @@ export function App() {
   // not localStorage -- this only remembers WHICH imagery to re-fetch, then
   // always re-fetches it (and its history) fresh from the API.
   useEffect(() => {
+    // A refresh on the profile screen stays there; the restored chat is one Back away.
+    const showRestoredWorkspace = () => {
+      if (initialScreenRef.current === 'profile') setHistoryStack(['workspace']);
+      else setActiveScreen('workspace');
+    };
     let lastConversationId;
     let lastImageryId;
     try {
@@ -326,7 +358,7 @@ export function App() {
             return;
           }
           setWorkspaceScenario(buildConversationScenario(detail));
-          setActiveScreen('workspace');
+          showRestoredWorkspace();
         } catch (err) {
           console.error('[SatQuery] Could not restore last conversation:', err);
           rememberPointer(LAST_CONVERSATION_KEY, null);
@@ -344,7 +376,7 @@ export function App() {
         ]);
         const itemsForImage = history.filter(h => h.imagery_id === lastImageryId);
         setWorkspaceScenario(buildLegacyScenario(imagery, itemsForImage));
-        setActiveScreen('workspace');
+        showRestoredWorkspace();
       } catch (err) {
         // Imagery no longer exists (deleted) or backend unreachable -- clear
         // the stale pointer and fall back to the empty landing state, never
@@ -528,6 +560,8 @@ export function App() {
         activeConversationId={activeConversation?.id || null}
         activeImageryId={workspaceScenario?.isLegacy ? workspaceScenario.id : null}
         refreshToken={historyRefreshToken}
+        profileUser={profileUser}
+        onOpenProfile={() => navigateToScreen('profile')}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -634,6 +668,10 @@ export function App() {
                 onAnalysisSubmitted={handleQuerySubmitted}
                 onImageryUploaded={bumpHistory}
               />
+            )}
+
+            {activeScreen === 'profile' && (
+              <ProfileDashboard onProfileUpdated={setProfileUser} />
             )}
 
             {activeScreen === 'viewer' && (

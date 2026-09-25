@@ -47,7 +47,8 @@ import {
   listConversations,
   renameConversation,
   type Conversation,
-  type HistoryItem as ApiHistoryItem
+  type HistoryItem as ApiHistoryItem,
+  type ProfileUser
 } from "../lib/apiClient"
 
 interface UserHistorySidebarProps {
@@ -61,6 +62,9 @@ interface UserHistorySidebarProps {
   activeConversationId?: string | null
   activeImageryId?: string | null
   refreshToken?: number
+  /** The workspace profile from GET /profile; null while loading or if unavailable. */
+  profileUser?: ProfileUser | null
+  onOpenProfile?: () => void
   theme: string
   onToggleTheme: () => void
 }
@@ -91,6 +95,29 @@ function groupForDate(iso: string): DateGroup {
   if (days < 7) return "sevenDays"
   if (days < 30) return "thirtyDays"
   return "older"
+}
+
+function initialsOf(name?: string | null): string {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean)
+  if (!parts.length) return "?"
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase()
+}
+
+function planLabel(plan?: string | null): string {
+  const value = plan || "free"
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)} Plan`
+}
+
+// Photo if the profile has one, otherwise its initials. Nothing is shown in
+// place of a profile that hasn't loaded -- no placeholder identity.
+function ProfileAvatar({ user, className }: { user?: ProfileUser | null; className: string }) {
+  return (
+    <div className={`${className} rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm overflow-hidden`}>
+      {user?.avatar_url
+        ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+        : user ? initialsOf(user.display_name) : <User className="w-3.5 h-3.5" />}
+    </div>
+  )
 }
 
 function truncate(text: string, max = 60): string {
@@ -322,6 +349,8 @@ export function UserHistorySidebar({
   activeConversationId,
   activeImageryId,
   refreshToken,
+  profileUser,
+  onOpenProfile,
   theme,
   onToggleTheme
 }: UserHistorySidebarProps) {
@@ -662,20 +691,21 @@ export function UserHistorySidebar({
             <SidebarMenuButton
               ref={profileTriggerRef}
               data-state={isProfileMenuOpen ? "open" : "closed"}
+              isActive={activeScreen === "profile"}
               onClick={() => setIsProfileMenuOpen((open) => !open)}
               className="w-full justify-between gap-3 h-12 hover:bg-sidebar-accent rounded-lg p-2"
             >
               <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-7 h-7 rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm">
-                  SD
-                </div>
+                <ProfileAvatar user={profileUser} className="w-7 h-7" />
                 <div className="flex flex-col items-start min-w-0 leading-tight">
-                  <span className="text-sm font-semibold text-sidebar-foreground truncate">
-                    Shruti Daware
+                  <span className="text-sm font-semibold text-sidebar-foreground truncate max-w-full">
+                    {profileUser?.display_name ?? "Profile"}
                   </span>
-                  <span className="text-[0.72rem] text-sidebar-foreground/60 truncate">
-                    ISRO Remote Sensing Lab
-                  </span>
+                  {profileUser && (
+                    <span className="text-[0.72rem] text-sidebar-foreground/60 truncate max-w-full">
+                      {planLabel(profileUser.plan)}
+                    </span>
+                  )}
                 </div>
               </div>
               <MoreHorizontal className="w-4 h-4 opacity-60 shrink-0" />
@@ -692,16 +722,16 @@ export function UserHistorySidebar({
           className="fixed z-[9999] flex w-[225px] flex-col rounded-[9px] border border-[rgba(148,163,184,0.16)] bg-[#080d18] p-1.5 shadow-[0_10px_25px_rgba(0,0,0,0.35)] animate-in fade-in-0 slide-in-from-left-1 duration-150"
         >
           <div className="flex items-center gap-2.5 px-2.5 py-2.5">
-            <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm">
-              SD
-            </div>
+            <ProfileAvatar user={profileUser} className="w-8 h-8" />
             <div className="flex flex-col items-start min-w-0 leading-tight">
-              <span className="text-[13px] font-semibold text-white truncate">
-                Shruti Daware
+              <span className="text-[13px] font-semibold text-white truncate max-w-full">
+                {profileUser?.display_name ?? "Profile"}
               </span>
-              <span className="text-[11px] text-[#94a3b8]">
-                ISRO Remote Sensing Lab
-              </span>
+              {profileUser && (
+                <span className="text-[11px] text-[#94a3b8] truncate max-w-full">
+                  @{profileUser.username}
+                </span>
+              )}
             </div>
           </div>
 
@@ -711,7 +741,11 @@ export function UserHistorySidebar({
             <button
               role="menuitem"
               className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
-              onClick={() => setIsProfileMenuOpen(false)}
+              onClick={() => {
+                setIsProfileMenuOpen(false)
+                onOpenProfile?.()
+                if (isMobile) setOpenMobile(false)
+              }}
             >
               <User className="w-4 h-4 text-[#cbd5e1]" />
               <span>Profile</span>

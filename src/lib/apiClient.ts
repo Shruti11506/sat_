@@ -328,3 +328,99 @@ export function getEvidence(resultId: string) {
     }>
   >(`/results/${resultId}/evidence`);
 }
+
+// ---- Profile / analytics ---------------------------------------------------------
+// Single-workspace prototype: the backend resolves the profile itself, so no
+// call here ever sends a user id. Every number is aggregated from stored rows.
+
+export interface ProfileUser {
+  id: string;
+  username: string;
+  display_name: string;
+  headline: string | null;
+  bio: string | null;
+  plan: string;
+  /** Fresh signed URL, or null -> show the initials fallback. */
+  avatar_url: string | null;
+  timezone: string;
+}
+
+export interface ProfileStats {
+  total_queries: number;
+  scenes_analyzed: number;
+  current_streak: number;
+  longest_streak: number;
+}
+
+export interface ActivityDay {
+  date: string;
+  query_count: number;
+}
+
+export interface ProfileInsights {
+  most_used_data_type: string | null;
+  most_common_task: string | null;
+  total_queries: number;
+  scenes_uploaded: number;
+  scenes_analyzed: number;
+  successful_analyses: number;
+  failed_analyses: number;
+  pending_analyses: number;
+  active_days: number;
+  avg_queries_per_active_day: number | null;
+}
+
+export interface ProfileDashboard {
+  user: ProfileUser;
+  stats: ProfileStats;
+  /** Every day of the last year (zeros included), oldest first, starting on a Sunday. */
+  activity: ActivityDay[];
+  activity_start: string;
+  activity_end: string;
+  insights: ProfileInsights;
+  features: Array<{ feature: string; query_count: number }>;
+  remote_sensing_usage: Array<{
+    data_type: string;
+    label: string;
+    scenes: number;
+    percentage: number;
+    query_count: number;
+  }>;
+  recent_activity: Array<{
+    id: string;
+    kind: "upload" | "query";
+    activity_type: string;
+    label: string;
+    status: string;
+    created_at: string;
+  }>;
+}
+
+/** Everything the profile page shows, in one request. */
+export function getProfileDashboard() {
+  return request<ProfileDashboard>("/profile/dashboard");
+}
+
+export function getProfile() {
+  return request<{ user: ProfileUser; stats: ProfileStats }>("/profile");
+}
+
+/** Only the fields present are changed. */
+export function updateProfile(changes: {
+  display_name?: string;
+  username?: string;
+  headline?: string;
+  bio?: string;
+}) {
+  return request<ProfileUser>("/profile", { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export function uploadProfileAvatar(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<ProfileUser>("/profile/avatar", { method: "POST", body: form });
+}
+
+export function removeProfileAvatar() {
+  return request<ProfileUser>("/profile/avatar", { method: "DELETE" });
+}

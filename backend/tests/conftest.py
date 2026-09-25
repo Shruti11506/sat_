@@ -15,6 +15,7 @@ def fake_supabase(monkeypatch):
     monkeypatch.setattr("app.services.job_service.get_supabase", lambda: fake)
     monkeypatch.setattr("app.services.conversation_service.get_supabase", lambda: fake)
     monkeypatch.setattr("app.services.result_service.get_supabase", lambda: fake)
+    monkeypatch.setattr("app.services.profile_service.get_supabase", lambda: fake)
 
     return fake
 

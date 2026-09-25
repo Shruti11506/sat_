@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # limit is higher.
     MAX_UPLOAD_SIZE_MB: int = 50
 
+    # IANA timezone used to bucket query activity into calendar days (heatmap,
+    # streaks) when the profile has no timezone of its own.
+    APP_TIMEZONE: str = "Asia/Kolkata"
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

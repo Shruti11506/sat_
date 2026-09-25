@@ -133,7 +133,7 @@ Since the bucket is **private**, `GET /api/v1/imagery/{id}` resolves a fresh **s
 
 ### Row Level Security
 
-The backend connects with the `service_role` (`SUPABASE_SECRET_KEY`), which always bypasses RLS, so RLS is not required for FastAPI ↔ Supabase to work. `schema.sql` includes commented-out `enable row level security` statements for all 5 tables as defense-in-depth, with no policies for `anon`/`authenticated` — since the frontend never talks to Supabase directly (only through FastAPI), those roles should have zero access. Uncomment and run them if you want that extra layer.
+The backend connects with the `service_role` (`SUPABASE_SECRET_KEY`), which always bypasses RLS, so RLS doesn't affect FastAPI ↔ Supabase. Migration `0004_profile_analytics.sql` **enables RLS on every table** with no policies for `anon`/`authenticated`, and revokes `profile_dashboard()` from those roles — the frontend never talks to Supabase directly, so they get zero access (verified: the publishable key reads 0 rows and gets `42501` on the function).
 
 ## 10-11. API endpoints & examples
 
@@ -172,8 +172,15 @@ The `/health/*` connectivity checks are the exception — they put status in `da
 | GET | `/api/v1/jobs/{job_id}` | Get job status |
 | GET | `/api/v1/results/{result_id}` | Get a stored result (404 if none exists yet) |
 | GET | `/api/v1/results/{result_id}/evidence` | Get stored evidence for a result |
+| GET | `/api/v1/profile/dashboard` | Everything the profile page shows in ONE request: user, stats (queries, scenes analyzed, current/longest streak), a year of daily activity (zeros included, starting on a Sunday), insights, feature usage, remote-sensing usage, recent activity |
+| GET | `/api/v1/profile` | `{user, stats}` |
+| PATCH | `/api/v1/profile` | Update any of `display_name`, `username`, `headline`, `bio` (only the fields sent) |
+| POST / DELETE | `/api/v1/profile/avatar` | Upload (multipart `file`, JPG/PNG/WEBP ≤ 5 MB → `avatars/{profile id}/…` in the bucket) / remove the profile photo |
+| GET | `/api/v1/profile/activity?period=year`, `/insights`, `/features`, `/recent-activity` | Slices of the dashboard |
 
 Error codes added by the upload flow: `UNSUPPORTED_FILE_TYPE`, `EMPTY_FILE`, `FILE_TOO_LARGE`, `MISSING_FILENAME`, `INVALID_METADATA` (422), `STORAGE_UPLOAD_FAILED` (500, upload itself failed — no DB record is created), `INVALID_QUERY` (422, empty/whitespace-only query on `/analysis`). Conversations add `CONVERSATION_NOT_FOUND` (404) and `INVALID_TITLE` (422). The conversation endpoints need migration `supabase/migrations/0003_conversations.sql`.
+
+**Profile endpoints** need migration `supabase/migrations/0004_profile_analytics.sql` (until then they return 503 `SCHEMA_NOT_MIGRATED`, and the page shows that message with Retry). Identity: no login in this prototype — exactly one workspace profile (a unique index enforces it), resolved server-side by `profile_service.get_current_profile`; no endpoint accepts a user id. Aggregation runs in Postgres (`profile_dashboard()`, one RPC); Python only derives streaks and keyword categories (`services/usage_classifier.py` — deterministic, not a model: task from the query text, data type from filename/sensor/source, with JPEG/PNG/WEBP defaulting to Optical / RGB). Days are bucketed in the profile's `timezone`, else `APP_TIMEZONE` (default `Asia/Kolkata`); the current streak survives until today ends. Errors: `INVALID_DISPLAY_NAME`, `INVALID_USERNAME`, `INVALID_HEADLINE`, `INVALID_BIO` (422), avatar reuses `UNSUPPORTED_FILE_TYPE` / `EMPTY_FILE` / `FILE_TOO_LARGE`.
 
 Example — upload an image, then create an analysis request:
 

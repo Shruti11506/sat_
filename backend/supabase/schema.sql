@@ -103,6 +103,10 @@ create index if not exists idx_analysis_results_job_id on analysis_results(job_i
 create index if not exists idx_evidence_result_id on evidence(result_id);
 create index if not exists idx_audit_logs_job_id on audit_logs(job_id);
 
+-- Profile page (profiles table, profile_dashboard() aggregation, RLS): run
+-- migrations/0004_profile_analytics.sql after this file -- it is additive and
+-- re-runnable, so it is not duplicated here.
+
 -- Storage bucket used by the backend (see app/services/storage_service.py).
 -- Uncomment and run if you manage storage via SQL instead of the Supabase
 -- dashboard's Storage UI:

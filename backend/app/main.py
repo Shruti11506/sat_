@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import analysis, conversations, evidence, health, imagery, jobs, results
+from app.api.routes import analysis, conversations, evidence, health, imagery, jobs, profile, results
 from app.core.config import get_settings
 from app.core.exceptions import ApiError
 from app.core.logging import configure_logging
@@ -73,3 +73,4 @@ app.include_router(analysis.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(results.router, prefix=API_PREFIX)
 app.include_router(evidence.router, prefix=API_PREFIX)
+app.include_router(profile.router, prefix=API_PREFIX)

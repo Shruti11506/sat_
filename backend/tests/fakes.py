@@ -7,13 +7,23 @@ don't require a live Supabase project.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import date, datetime, timezone
 
 
 class FakeResponse:
     def __init__(self, data, count=None):
         self.data = data
         self.count = count
+
+
+class FakeApiError(Exception):
+    """Shaped like postgrest.exceptions.APIError (message + PostgREST code)."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.message = message
+        self.code = code
 
 
 class FakeQuery:
@@ -80,6 +90,8 @@ class FakeQuery:
         return all(str(row.get(col)) in values for col, values in self._in_filters)
 
     def execute(self) -> FakeResponse:
+        if self.client and self.table_name in self.client.missing:
+            raise FakeApiError(f"Could not find the table 'public.{self.table_name}'", "PGRST205")
         table = self.store.setdefault(self.table_name, [])
 
         if self._op == "insert":
@@ -211,6 +223,74 @@ class FakeSupabaseClient:
         # Table names for which the NEXT delete().execute() should raise,
         # simulating e.g. a foreign key violation. Self-clearing (one-shot).
         self.fail_next_table_delete: set[str] = set()
+        # Tables / RPC functions that "don't exist" (an unapplied migration).
+        self.missing: set[str] = set()
+        self.today: date | None = None
 
     def table(self, name: str) -> FakeQuery:
         return FakeQuery(self.store, name, client=self)
+
+    def rpc(self, name: str, params: dict | None = None) -> "FakeRpc":
+        return FakeRpc(self, name, params or {})
+
+    def profile_dashboard(self, p_timezone: str = "UTC", p_recent_limit: int = 10) -> dict:
+        """Python mirror of the profile_dashboard() SQL function (migrations/0004).
+
+        Days are bucketed in UTC regardless of p_timezone; set `self.today`
+        to pin "today" for streak tests.
+        """
+        jobs = self.store.get("analysis_jobs", [])
+        imagery = self.store.get("imagery", [])
+
+        def day(ts: str) -> date:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+
+        per_day = Counter(day(j["created_at"]) for j in jobs)
+        groups = Counter((j.get("analysis_type"), (j.get("query") or "").strip().lower()) for j in jobs)
+        per_image = Counter(j.get("imagery_id") for j in jobs)
+        recent = [
+            {"kind": "upload", "id": i["id"], "label": i.get("original_filename") or i.get("name"),
+             "status": "uploaded", "analysis_type": None, "created_at": i["created_at"]}
+            for i in imagery
+        ] + [
+            {"kind": "query", "id": j["id"], "label": j.get("query"), "status": j.get("status"),
+             "analysis_type": j.get("analysis_type"), "created_at": j["created_at"]}
+            for j in jobs
+        ]
+        recent.sort(key=lambda r: r["created_at"], reverse=True)
+        return {
+            "today": (self.today or datetime.now(timezone.utc).date()).isoformat(),
+            "totals": {
+                "total_queries": len(jobs),
+                "completed": sum(1 for j in jobs if j.get("status") == "completed"),
+                "failed": sum(1 for j in jobs if j.get("status") == "failed"),
+                "pending": sum(1 for j in jobs if j.get("status") in ("queued", "processing")),
+                "scenes_analyzed": len({j["imagery_id"] for j in jobs if j.get("imagery_id")}),
+            },
+            "scenes_uploaded": len(imagery),
+            "active_days": [
+                {"date": d.isoformat(), "query_count": n} for d, n in sorted(per_day.items())
+            ],
+            "query_groups": [
+                {"analysis_type": t, "query": q, "count": n} for (t, q), n in groups.items()
+            ],
+            "scenes": [
+                {"name": i.get("name"), "original_filename": i.get("original_filename"),
+                 "mime_type": i.get("mime_type"), "sensor": i.get("sensor"), "source": i.get("source"),
+                 "query_count": per_image.get(i["id"], 0)}
+                for i in imagery
+            ],
+            "recent": recent[: max(p_recent_limit, 0)],
+        }
+
+
+class FakeRpc:
+    def __init__(self, client: FakeSupabaseClient, name: str, params: dict):
+        self.client = client
+        self.name = name
+        self.params = params
+
+    def execute(self) -> FakeResponse:
+        if self.name in self.client.missing or self.name != "profile_dashboard":
+            raise FakeApiError(f"Could not find the function public.{self.name}", "PGRST202")
+        return FakeResponse(self.client.profile_dashboard(**self.params))
