@@ -7,6 +7,9 @@ import {
   Image as ImageIcon,
   Puzzle,
   Compass,
+  Cpu,
+  FolderKanban,
+  Plus,
   GitCompare,
   BarChart3,
   Sparkles,
@@ -67,6 +70,10 @@ interface UserHistorySidebarProps {
   onOpenProfile?: () => void
   theme: string
   onToggleTheme: () => void
+  activeModel?: any
+  projects?: any[]
+  activeProjectId?: string | null
+  onOpenProject?: (project: any) => void
 }
 
 // One sidebar row. Conversations carry their stored title; legacy entries
@@ -352,7 +359,11 @@ export function UserHistorySidebar({
   profileUser,
   onOpenProfile,
   theme,
-  onToggleTheme
+  onToggleTheme,
+  activeModel,
+  projects,
+  activeProjectId,
+  onOpenProject
 }: UserHistorySidebarProps) {
   // Real backend data ONLY -- see CLAUDE.md / backend README. No hardcoded
   // entries, and a failed fetch never falls back to stale/sample data.
@@ -545,6 +556,42 @@ export function UserHistorySidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => {
+                onNavigateScreen("model-attach")
+                if (isMobile) setOpenMobile(false)
+              }}
+              isActive={activeScreen === "model-attach"}
+              className="text-[0.92rem] py-2 h-9 relative"
+              tooltip="Attach Custom AI Model (Folder Drag & Drop)"
+            >
+              <Cpu className="w-4 h-4 text-sidebar-foreground" />
+              <span className="flex-1 truncate">Attach model</span>
+              {activeModel && (
+                <span 
+                  className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)] shrink-0" 
+                  title={`Active Model: ${activeModel.name}`} 
+                />
+              )}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                onNavigateScreen("projects")
+                if (isMobile) setOpenMobile(false)
+              }}
+              isActive={activeScreen === "projects"}
+              className="text-[0.92rem] py-2 h-9"
+              tooltip="ChatGPT-Style Project Workspaces"
+            >
+              <FolderKanban className="w-4 h-4 text-sidebar-foreground" />
+              <span>Projects</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
                 onNavigateScreen("report")
                 if (isMobile) setOpenMobile(false)
               }}
@@ -579,6 +626,47 @@ export function UserHistorySidebar({
               <span>Retry</span>
             </button>
           </div>
+        )}
+
+        {/* ChatGPT-Style Dedicated Projects Section */}
+        {projects && projects.length > 0 && (
+          <SidebarGroup className="py-1">
+            <div className="flex items-center justify-between px-2 py-1">
+              <SidebarGroupLabel className="text-xs font-semibold text-sidebar-foreground/60 tracking-wider uppercase p-0">
+                Projects
+              </SidebarGroupLabel>
+              <button 
+                onClick={() => onNavigateScreen("projects")}
+                className="p-1 rounded hover:bg-sidebar-accent text-sidebar-foreground/70 hover:text-sidebar-foreground transition-colors cursor-pointer"
+                title="Manage or create projects"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {projects.slice(0, 4).map((p) => {
+                  const isProjActive = activeScreen === "projects" && activeProjectId === p.id;
+                  return (
+                    <SidebarMenuItem key={p.id}>
+                      <SidebarMenuButton
+                        onClick={() => {
+                          onOpenProject ? onOpenProject(p) : onNavigateScreen("projects");
+                          if (isMobile) setOpenMobile(false);
+                        }}
+                        isActive={isProjActive}
+                        className="text-[0.88rem] py-1.5 h-8 gap-2"
+                        tooltip={p.name}
+                      >
+                        <span className="text-sm shrink-0">{p.icon || "📁"}</span>
+                        <span className="truncate">{p.name}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
         )}
 
         {status === "ready" && entries.length === 0 && (

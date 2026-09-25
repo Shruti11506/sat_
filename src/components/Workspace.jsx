@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, Send, Mic, Copy, Check, RefreshCw, Volume2, 
   ChevronDown, ChevronUp, Cpu, ExternalLink, ShieldCheck, 
-  ImagePlus, X, Satellite, Layers, MapPin, ArrowLeft, GitCompare
+  ImagePlus, X, Satellite, Layers, MapPin, ArrowLeft, GitCompare,
+  FolderKanban
 } from 'lucide-react';
 import { ImageViewer } from './ImageViewer';
 import { uploadImagery, submitAnalysis } from '../lib/apiClient';
+import { runModelInference } from '../lib/modelsStorage';
 
 const QUICK_SUGGESTIONS = [
   { icon: '📄', label: 'Give me the Report', text: 'Give me the report for this satellite scene' },
@@ -18,7 +20,16 @@ const QUICK_SUGGESTIONS = [
 
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
 
-export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted, onEnsureConversation, onImageryUploaded }) {
+export function Workspace({ 
+  scenario, 
+  onNavigateScreen, 
+  onGoBack, 
+  onAnalysisSubmitted, 
+  onEnsureConversation, 
+  onImageryUploaded,
+  activeModel,
+  activeProject
+}) {
   const [messages, setMessages] = useState(scenario.chatHistory || []);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -106,13 +117,30 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
       textareaRef.current?.focus();
     }, 50);
 
-    if (!imageryIdForAnalysis) {
-      // No real Supabase-backed image to reference -- backend requires a
-      // valid imagery_id, so there is nothing honest to submit. No AI/fake
-      // response is generated either way.
-      // An image on screen with no persisted imagery_id means its upload never
-      // reached the backend (e.g. backend not running) -- say that, rather than
-      // asking the user to attach an image they can already see.
+    // If an attached model is active, run custom model inference to participate in answering
+    if (activeModel && query) {
+      setIsTyping(true);
+      setTimeout(() => {
+        const inf = runModelInference(activeModel, query, { opticalImg: activeViewerImage });
+        const customModelMsg = {
+          id: `ai-model-${Date.now()}`,
+          sender: 'ai',
+          taskType: `${activeModel.name} (${activeModel.task})`,
+          text: `[Attached Custom Model Inference — ${activeModel.name}]\n${inf.summary}`,
+          isCustomModel: true,
+          modelResult: inf,
+          confidence: Math.round((activeModel.confidenceThreshold || 0.5) * 100),
+          status: 'completed',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage
+        };
+        setMessages(prev => [...prev, customModelMsg]);
+        setIsTyping(false);
+      }, 450);
+    }
+
+    if (!imageryIdForAnalysis && !activeModel) {
+      // No real Supabase-backed image to reference and no active local model
       const unsavedImageShown = !attachmentPayload && Boolean(activeViewerImage);
       const notice = {
         id: `ai-${Date.now()}`,
@@ -121,7 +149,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
           ? 'This image could not be uploaded to the backend, so no analysis request could be submitted. Please try attaching it again.'
           : unsavedImageShown
             ? 'The image shown was never saved to the backend (its upload failed -- check that the backend is running), so no analysis request was submitted. Re-attach the image to try again.'
-            : 'Please attach a satellite image before submitting a query -- an analysis request must reference an uploaded image.',
+            : 'Please attach a satellite image before submitting a query, or attach a custom model to run local edge inference.',
         isError: Boolean(attachmentPayload) || unsavedImageShown,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
@@ -129,43 +157,45 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
       return;
     }
 
-    // Attaching an image without typing anything just adds it to the chat;
-    // no query is invented on the user's behalf.
+    // Attaching an image without typing anything just adds it to the chat
     if (!query) return;
 
-    setIsTyping(true);
-
-    const conversationForQuery = conversationId;
-    submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery)
-      .then((job) => {
-        const ack = {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: 'Analysis request submitted.',
-          status: job.status,
-          jobId: job.job_id,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage
-        };
-        setMessages(prev => [...prev, ack]);
-        onAnalysisSubmitted?.(conversationForQuery);
-      })
-      .catch((err) => {
-        const errorMsg = {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: `Failed to submit analysis request: ${err.message || 'unknown error'}`,
-          isError: true,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        setMessages(prev => [...prev, errorMsg]);
-      })
-      .finally(() => {
-        setIsTyping(false);
-        setTimeout(() => {
-          textareaRef.current?.focus();
-        }, 100);
-      });
+    if (imageryIdForAnalysis) {
+      setIsTyping(true);
+      const conversationForQuery = conversationId;
+      submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery)
+        .then((job) => {
+          const ack = {
+            id: `ai-${Date.now()}`,
+            sender: 'ai',
+            text: activeModel ? 'Cloud backend job queued alongside local model inference.' : 'Analysis request submitted.',
+            status: job.status,
+            jobId: job.job_id,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            evidenceThumb: attachmentPayload?.previewUrl || activeViewerImage
+          };
+          setMessages(prev => [...prev, ack]);
+          onAnalysisSubmitted?.(conversationForQuery);
+        })
+        .catch((err) => {
+          if (!activeModel) {
+            const errorMsg = {
+              id: `ai-${Date.now()}`,
+              sender: 'ai',
+              text: `Failed to submit analysis request: ${err.message || 'unknown error'}`,
+              isError: true,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            };
+            setMessages(prev => [...prev, errorMsg]);
+          }
+        })
+        .finally(() => {
+          setIsTyping(false);
+          setTimeout(() => {
+            textareaRef.current?.focus();
+          }, 100);
+        });
+    }
   };
 
   // Handle image attachment from within the chat box
@@ -405,6 +435,59 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
                   {msg.text}
                 </div>
 
+                {/* Custom Model Inference Details Card */}
+                {msg.isCustomModel && msg.modelResult && (
+                  <div className="custom-model-result-card" style={{
+                    marginTop: 'var(--space-3)',
+                    padding: '12px',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-subtle)'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: '8px', marginBottom: '8px', borderBottom: '1px solid var(--border-subtle)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Cpu size={14} style={{ color: '#10b981' }} />
+                        <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                          {msg.modelResult.modelName}
+                        </span>
+                        <span className="badge-pill-xs badge-pill-cyan" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>
+                          {msg.modelResult.modelArchitecture || 'Custom Weights'}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                        {msg.modelResult.latencyMs} ms • {msg.modelResult.device}
+                      </span>
+                    </div>
+
+                    {msg.modelResult.detections && msg.modelResult.detections.length > 0 && (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 6, margin: '8px 0' }}>
+                        {msg.modelResult.detections.map((det, dIdx) => (
+                          <div key={dIdx} style={{ padding: '6px 10px', borderRadius: 'var(--radius-sm)', background: 'rgba(0,0,0,0.2)', border: '1px solid var(--border-subtle)', fontSize: '0.75rem' }}>
+                            <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{det.label}</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.7rem', marginTop: 2 }}>
+                              <span>Confidence:</span>
+                              <strong style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{Math.round(det.confidence * 100)}%</strong>
+                            </div>
+                            {det.areaKm2 && (
+                              <div style={{ fontSize: '0.7rem', color: '#38bdf8' }}>Area: {det.areaKm2}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {msg.modelResult.metrics && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingTop: 6, borderTop: '1px solid var(--border-subtle)', fontSize: '0.72rem' }}>
+                        {Object.entries(msg.modelResult.metrics).map(([k, v]) => (
+                          <span key={k} style={{ padding: '2px 8px', borderRadius: 'var(--radius-sm)', background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)' }}>
+                            {k}: <strong style={{ color: 'var(--text-primary)' }}>{v}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Direct Action Link if navigation triggered */}
                 {msg.actionLink && (
                   <div style={{ marginBottom: 'var(--space-3)' }}>
@@ -554,6 +637,49 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
 
         {/* Bottom Conversational Prompt Bar (Gemini / ChatGPT Style) */}
         <div style={{ padding: 'var(--space-3) var(--space-4)', borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-glass)' }}>
+          {/* Active Model / Project Status Banner */}
+          {(activeModel || activeProject) && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, padding: '4px 10px', borderRadius: 'var(--radius-sm)', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', fontSize: '0.78rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                {activeModel && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Cpu size={13} style={{ color: '#10b981' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>Attached Model:</span>
+                    <strong style={{ color: 'var(--text-primary)' }}>{activeModel.name}</strong>
+                    <span className="badge-pill-xs badge-pill-emerald" style={{ fontSize: '0.65rem', padding: '1px 5px' }}>Active</span>
+                  </div>
+                )}
+                {activeProject && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: '0.9rem' }}>{activeProject.icon || '📁'}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>Project:</span>
+                    <strong style={{ color: 'var(--text-primary)' }}>{activeProject.name}</strong>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {activeModel && (
+                  <button 
+                    type="button" 
+                    onClick={() => onNavigateScreen('model-attach')} 
+                    style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: '0.74rem', textDecoration: 'underline' }}
+                  >
+                    Configure Model
+                  </button>
+                )}
+                {activeProject && (
+                  <button 
+                    type="button" 
+                    onClick={() => onNavigateScreen('projects')} 
+                    style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: '0.74rem', textDecoration: 'underline' }}
+                  >
+                    View Project
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Quick Suggestion Chips */}
           <div className="chat-suggestion-pills">
             {QUICK_SUGGESTIONS.map((sug, idx) => (

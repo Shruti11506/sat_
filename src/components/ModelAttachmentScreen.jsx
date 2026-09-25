@@ -1,0 +1,644 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { 
+  Cpu, Upload, FolderUp, CheckCircle2, ShieldCheck, Zap,
+  Play, Settings, FileCode, Check, Trash2, ArrowLeft,
+  FileCheck, Sparkles, HardDrive, RefreshCw, AlertCircle,
+  Layers, Sliders, Info, Eye, Boxes
+} from 'lucide-react';
+import { 
+  getStoredModels, saveStoredModels, getActiveModelId, 
+  setActiveModelId, parseFolderFiles, runModelInference, formatBytes 
+} from '../lib/modelsStorage';
+
+export function ModelAttachmentScreen({ onGoBack, onSelectModel, activeModelId }) {
+  const [models, setModels] = useState([]);
+  const [currentActiveId, setCurrentActiveId] = useState(activeModelId || null);
+  const [selectedModel, setSelectedModel] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [isTesting, setIsTesting] = useState(false);
+  const [toastMessage, setToastMessage] = useState(null);
+
+  const folderInputRef = useRef(null);
+  const filesInputRef = useRef(null);
+
+  // Load models on mount
+  useEffect(() => {
+    const loaded = getStoredModels();
+    setModels(loaded);
+    const active = activeModelId || getActiveModelId();
+    setCurrentActiveId(active);
+    const initialSelected = loaded.find(m => m.id === active) || loaded[0] || null;
+    setSelectedModel(initialSelected);
+  }, [activeModelId]);
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const handleActivateModel = (modelId) => {
+    setCurrentActiveId(modelId);
+    setActiveModelId(modelId);
+    const model = models.find(m => m.id === modelId);
+    onSelectModel?.(model);
+    showToast(`"${model?.name}" is now active and will answer questions in chat.`);
+  };
+
+  const handleDeactivateModel = () => {
+    setCurrentActiveId(null);
+    setActiveModelId(null);
+    onSelectModel?.(null);
+    showToast('Custom model deactivated. Default SatQuery reasoning engine active.');
+  };
+
+  // Traverse dropped directory items recursively
+  const traverseDirectory = async (item) => {
+    const files = [];
+    if (item.isFile) {
+      const file = await new Promise((resolve, reject) => item.file(resolve, reject));
+      files.push(file);
+    } else if (item.isDirectory) {
+      const dirReader = item.createReader();
+      const readEntries = async () => {
+        const entries = await new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
+        if (entries.length > 0) {
+          for (const entry of entries) {
+            const nested = await traverseDirectory(entry);
+            files.push(...nested);
+          }
+          await readEntries(); // read entries until empty (browser batching)
+        }
+      };
+      await readEntries();
+    }
+    return files;
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    setIsProcessing(true);
+    try {
+      const items = e.dataTransfer.items;
+      let allFiles = [];
+
+      if (items && items.length > 0) {
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+          if (item) {
+            const filesFromEntry = await traverseDirectory(item);
+            allFiles.push(...filesFromEntry);
+          }
+        }
+      }
+
+      // Fallback to dataTransfer.files
+      if (allFiles.length === 0 && e.dataTransfer.files) {
+        allFiles = Array.from(e.dataTransfer.files);
+      }
+
+      if (allFiles.length > 0) {
+        processUploadedFiles(allFiles);
+      } else {
+        showToast('No valid files or directory detected in drag-and-drop.');
+      }
+    } catch (err) {
+      console.error('[SatQuery] Error processing dropped folder:', err);
+      showToast('Error reading folder contents. Try using the folder picker.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleFolderSelect = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processUploadedFiles(Array.from(e.target.files));
+    }
+  };
+
+  const handleFilesSelect = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processUploadedFiles(Array.from(e.target.files));
+    }
+  };
+
+  const processUploadedFiles = (files) => {
+    setIsProcessing(true);
+    setTimeout(() => {
+      const newModel = parseFolderFiles(files);
+      const updated = [newModel, ...models];
+      setModels(updated);
+      saveStoredModels(updated);
+      setSelectedModel(newModel);
+      handleActivateModel(newModel.id);
+      setIsProcessing(false);
+      showToast(`Model "${newModel.name}" attached successfully with ${newModel.files.length} files!`);
+    }, 600);
+  };
+
+  const handleDeleteModel = (modelId, e) => {
+    e?.stopPropagation();
+    const updated = models.filter(m => m.id !== modelId);
+    setModels(updated);
+    saveStoredModels(updated);
+    if (currentActiveId === modelId) {
+      const fallback = updated[0]?.id || null;
+      setCurrentActiveId(fallback);
+      setActiveModelId(fallback);
+      onSelectModel?.(updated[0] || null);
+    }
+    if (selectedModel?.id === modelId) {
+      setSelectedModel(updated[0] || null);
+    }
+    showToast('Model removed from attached library.');
+  };
+
+  const handleUpdateModelSettings = (field, value) => {
+    if (!selectedModel) return;
+    const updatedModel = { ...selectedModel, [field]: value };
+    setSelectedModel(updatedModel);
+    const updated = models.map(m => m.id === selectedModel.id ? updatedModel : m);
+    setModels(updated);
+    saveStoredModels(updated);
+    if (currentActiveId === selectedModel.id) {
+      onSelectModel?.(updatedModel);
+    }
+  };
+
+  const handleRunTest = () => {
+    if (!selectedModel) return;
+    setIsTesting(true);
+    setTimeout(() => {
+      const res = runModelInference(selectedModel, 'Detect structural centroids, evaluate NDWI water coverage, and count features in active scene.');
+      setTestResult(res);
+      setIsTesting(false);
+    }, 700);
+  };
+
+  return (
+    <div className="model-attachment-screen">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="model-toast animate-fadeIn">
+          <CheckCircle2 size={16} className="text-emerald-400" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Screen Header */}
+      <div className="model-screen-header">
+        <div className="header-left">
+          <button 
+            onClick={onGoBack} 
+            className="btn btn-secondary btn-icon-back"
+            title="Back to previous screen"
+          >
+            <ArrowLeft size={16} />
+            <span>Back</span>
+          </button>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="screen-title">Attach Custom AI Model</h2>
+              <span className="badge-pill badge-pill-cyan">Edge Geospatial Inference</span>
+            </div>
+            <p className="screen-subtitle">
+              Drag & drop a local model directory (PyTorch <code>.pt/.pth</code>, ONNX, or SafeTensors) to participate in answering queries.
+            </p>
+          </div>
+        </div>
+
+        <div className="header-right">
+          {currentActiveId ? (
+            <div className="active-status-card">
+              <div className="status-indicator-dot online"></div>
+              <div className="text-xs">
+                <span className="text-muted block">Active in Chat:</span>
+                <strong className="text-emerald-400">
+                  {models.find(m => m.id === currentActiveId)?.name || 'Custom Model'}
+                </strong>
+              </div>
+              <button 
+                onClick={handleDeactivateModel} 
+                className="btn btn-xs btn-secondary ml-2"
+                title="Deactivate and use default reasoning engine"
+              >
+                Deactivate
+              </button>
+            </div>
+          ) : (
+            <div className="inactive-status-card">
+              <div className="status-indicator-dot"></div>
+              <span className="text-xs text-muted">No custom model active (Default AI reasoning)</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="model-screen-grid">
+        {/* Left Column: Drag & Drop Dropzone + Attached Models Library */}
+        <div className="model-left-col">
+          {/* Modern Folder Dropzone */}
+          <div 
+            className={`model-dropzone ${isDragging ? 'dragging' : ''} ${isProcessing ? 'processing' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="dropzone-ambient-glow"></div>
+            
+            {isProcessing ? (
+              <div className="dropzone-content py-6">
+                <RefreshCw size={36} className="text-cyan-400 animate-spin mb-3" />
+                <h4 className="text-base font-semibold">Inspecting Model Architecture...</h4>
+                <p className="text-xs text-muted">Extracting weights metadata, config YAML, and labels dictionary.</p>
+              </div>
+            ) : (
+              <div className="dropzone-content">
+                <div className="dropzone-icon-circle">
+                  <FolderUp size={32} className="text-cyan-400" />
+                </div>
+                <h3 className="dropzone-heading">Drag & Drop Model Folder Here</h3>
+                <p className="dropzone-desc">
+                  Drop an entire model directory or weights folder. SatQuery automatically detects checkpoint weights, precision, config JSON, and class labels.
+                </p>
+
+                <div className="dropzone-formats">
+                  <span className="format-tag">.pt / .pth (PyTorch)</span>
+                  <span className="format-tag">.onnx</span>
+                  <span className="format-tag">.safetensors</span>
+                  <span className="format-tag">config.json</span>
+                  <span className="format-tag">dataset.yaml</span>
+                </div>
+
+                <div className="dropzone-actions">
+                  <button 
+                    onClick={() => folderInputRef.current?.click()} 
+                    className="btn btn-primary"
+                    title="Select a directory of model files"
+                  >
+                    <FolderUp size={16} />
+                    <span>Browse Folder</span>
+                  </button>
+                  <button 
+                    onClick={() => filesInputRef.current?.click()} 
+                    className="btn btn-secondary"
+                    title="Select individual model weight files"
+                  >
+                    <Upload size={16} />
+                    <span>Select Weights File</span>
+                  </button>
+                </div>
+
+                {/* Hidden File Inputs */}
+                <input 
+                  type="file" 
+                  ref={folderInputRef}
+                  onChange={handleFolderSelect}
+                  // @ts-ignore
+                  webkitdirectory="" 
+                  directory="" 
+                  multiple 
+                  style={{ display: 'none' }} 
+                />
+                <input 
+                  type="file" 
+                  ref={filesInputRef}
+                  onChange={handleFilesSelect}
+                  multiple 
+                  accept=".pt,.pth,.onnx,.safetensors,.bin,.json,.yaml,.yml,.txt"
+                  style={{ display: 'none' }} 
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Model Library / Attached Models List */}
+          <div className="model-library-section">
+            <div className="library-header">
+              <div className="flex items-center gap-2">
+                <Boxes size={18} className="text-blue-400" />
+                <h3 className="section-title">Attached Models Library</h3>
+              </div>
+              <span className="text-xs text-muted">{models.length} Models Available</span>
+            </div>
+
+            <div className="model-card-list">
+              {models.map((model) => {
+                const isActive = currentActiveId === model.id;
+                const isSelected = selectedModel?.id === model.id;
+
+                return (
+                  <div 
+                    key={model.id}
+                    onClick={() => setSelectedModel(model)}
+                    className={`model-list-card ${isSelected ? 'selected' : ''} ${isActive ? 'active-model' : ''}`}
+                  >
+                    <div className="card-top">
+                      <div className="model-icon-badge">
+                        <Cpu size={18} className={isActive ? 'text-emerald-400' : 'text-blue-400'} />
+                      </div>
+                      <div className="model-meta">
+                        <div className="flex items-center gap-2">
+                          <h4 className="model-name">{model.name}</h4>
+                          {isActive && (
+                            <span className="badge-active-live">
+                              <span className="live-dot"></span> Active in Chat
+                            </span>
+                          )}
+                          {model.isCustom && (
+                            <span className="badge-pill badge-pill-custom">Custom</span>
+                          )}
+                        </div>
+                        <p className="model-task">{model.task} • {model.architecture}</p>
+                      </div>
+                    </div>
+
+                    <div className="card-bottom">
+                      <div className="specs-row">
+                        <span>Format: <strong>{model.format}</strong></span>
+                        <span>Size: <strong>{model.size}</strong></span>
+                        <span>Precision: <strong>{model.precision}</strong></span>
+                      </div>
+
+                      <div className="actions-row">
+                        {isActive ? (
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); handleDeactivateModel(); }}
+                            className="btn btn-xs btn-active-toggle"
+                          >
+                            <Check size={12} /> Active
+                          </button>
+                        ) : (
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); handleActivateModel(model.id); }}
+                            className="btn btn-xs btn-secondary"
+                          >
+                            Set Active
+                          </button>
+                        )}
+
+                        {model.isCustom && (
+                          <button 
+                            onClick={(e) => handleDeleteModel(model.id, e)}
+                            className="btn btn-xs btn-ghost text-red-400 hover:text-red-300"
+                            title="Remove attached model"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Model Inspector, Settings, & Real-time Test Preview */}
+        <div className="model-right-col">
+          {selectedModel ? (
+            <div className="model-detail-panel">
+              <div className="panel-header">
+                <div>
+                  <span className="text-xs uppercase tracking-wider text-muted font-mono">Model Configuration</span>
+                  <h3 className="panel-title">{selectedModel.name}</h3>
+                  <p className="panel-desc">{selectedModel.description}</p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {currentActiveId === selectedModel.id ? (
+                    <button 
+                      onClick={handleDeactivateModel}
+                      className="btn btn-sm btn-active-luminous"
+                    >
+                      <CheckCircle2 size={14} />
+                      <span>Active for Queries</span>
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={() => handleActivateModel(selectedModel.id)}
+                      className="btn btn-sm btn-primary"
+                    >
+                      <Zap size={14} />
+                      <span>Activate in Chat</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Specs Grid */}
+              <div className="specs-grid">
+                <div className="spec-card">
+                  <span className="spec-label">Architecture</span>
+                  <strong className="spec-value">{selectedModel.architecture}</strong>
+                </div>
+                <div className="spec-card">
+                  <span className="spec-label">Weight Size</span>
+                  <strong className="spec-value">{selectedModel.size}</strong>
+                </div>
+                <div className="spec-card">
+                  <span className="spec-label">Parameters</span>
+                  <strong className="spec-value">{selectedModel.parameters || 'N/A'}</strong>
+                </div>
+                <div className="spec-card">
+                  <span className="spec-label">Format</span>
+                  <strong className="spec-value">{selectedModel.format}</strong>
+                </div>
+              </div>
+
+              {/* Detected Files in Folder */}
+              <div className="detail-section">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="detail-subheading">
+                    <HardDrive size={14} className="text-cyan-400 inline mr-1.5" />
+                    Detected Checkpoint Files ({selectedModel.files?.length || 0})
+                  </h4>
+                  <span className="text-xs text-muted font-mono">{selectedModel.size} Total</span>
+                </div>
+
+                <div className="files-pill-container">
+                  {(selectedModel.files || []).map((file, idx) => (
+                    <div key={idx} className={`file-badge file-${file.type}`}>
+                      <FileCode size={13} />
+                      <span className="file-name">{file.name}</span>
+                      <span className="file-size">{file.size}</span>
+                      <span className="file-type-tag">{file.type}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tunable Inference Parameters */}
+              <div className="detail-section">
+                <h4 className="detail-subheading">
+                  <Sliders size={14} className="text-blue-400 inline mr-1.5" />
+                  Inference Tuning & Hardware Acceleration
+                </h4>
+
+                <div className="settings-form-grid">
+                  <div className="form-group">
+                    <label className="form-label">Target Capability / Task</label>
+                    <select 
+                      value={selectedModel.task}
+                      onChange={(e) => handleUpdateModelSettings('task', e.target.value)}
+                      className="form-select-sm"
+                    >
+                      <option value="Object Detection">Object Detection (Buildings, Ships, Solar Panels)</option>
+                      <option value="Semantic Segmentation">Semantic Segmentation (Water Bodies, Canopy, Urban)</option>
+                      <option value="Land Cover Classification">Land Cover & Spectral Classification (LULC)</option>
+                      <option value="SAR Marine Target Detection">SAR Marine Target & Vessel Detection</option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Acceleration Device</label>
+                    <select 
+                      value={selectedModel.device}
+                      onChange={(e) => handleUpdateModelSettings('device', e.target.value)}
+                      className="form-select-sm"
+                    >
+                      <option value="WebGPU (Direct Tensor Core)">WebGPU (Direct Hardware Acceleration)</option>
+                      <option value="CUDA Local Daemon">CUDA Local GPU Daemon</option>
+                      <option value="WASM CPU Multithreaded">WASM CPU (Universal Fallback)</option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <div className="flex justify-between text-xs mb-1">
+                      <label className="form-label mb-0">Confidence Threshold</label>
+                      <span className="font-mono text-cyan-400">
+                        {Math.round((selectedModel.confidenceThreshold || 0.5) * 100)}%
+                      </span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0.10"
+                      max="0.95"
+                      step="0.05"
+                      value={selectedModel.confidenceThreshold || 0.5}
+                      onChange={(e) => handleUpdateModelSettings('confidenceThreshold', parseFloat(e.target.value))}
+                      className="form-slider"
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <div className="flex justify-between text-xs mb-1">
+                      <label className="form-label mb-0">NMS IoU Threshold</label>
+                      <span className="font-mono text-cyan-400">
+                        {Math.round((selectedModel.nmsThreshold || 0.45) * 100)}%
+                      </span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0.10"
+                      max="0.90"
+                      step="0.05"
+                      value={selectedModel.nmsThreshold || 0.45}
+                      onChange={(e) => handleUpdateModelSettings('nmsThreshold', parseFloat(e.target.value))}
+                      className="form-slider"
+                    />
+                  </div>
+                </div>
+
+                <div className="form-group mt-3">
+                  <label className="form-label">Model Reasoning Instructions (Appended to Prompts)</label>
+                  <textarea 
+                    rows={2}
+                    value={selectedModel.instructions || ''}
+                    onChange={(e) => handleUpdateModelSettings('instructions', e.target.value)}
+                    placeholder="E.g. Focus specifically on rooftop geometry and calculate estimated square meters..."
+                    className="form-textarea-sm"
+                  />
+                </div>
+              </div>
+
+              {/* Instant Test Execution */}
+              <div className="detail-section test-section">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h4 className="detail-subheading mb-0">
+                      <Play size={14} className="text-emerald-400 inline mr-1.5" />
+                      Live Model Evaluation
+                    </h4>
+                    <p className="text-xs text-muted">Run zero-shot inference on the active satellite imagery.</p>
+                  </div>
+                  <button 
+                    onClick={handleRunTest} 
+                    disabled={isTesting}
+                    className="btn btn-sm btn-primary"
+                  >
+                    {isTesting ? (
+                      <>
+                        <RefreshCw size={13} className="animate-spin" />
+                        <span>Inferencing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play size={13} />
+                        <span>Run Test Inference</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {testResult && (
+                  <div className="test-result-box animate-fadeIn">
+                    <div className="test-telemetry-bar">
+                      <span className="badge-pill badge-pill-emerald">
+                        <Check size={11} /> Inference Passed
+                      </span>
+                      <span className="telemetry-stat">
+                        Latency: <strong>{testResult.latencyMs} ms</strong>
+                      </span>
+                      <span className="telemetry-stat">
+                        Device: <strong>{testResult.device}</strong>
+                      </span>
+                    </div>
+
+                    <p className="test-summary">{testResult.summary}</p>
+
+                    <div className="detections-grid">
+                      {testResult.detections?.map((d, i) => (
+                        <div key={i} className="detection-item">
+                          <span className="detection-label">{d.label}</span>
+                          <span className="detection-confidence font-mono">
+                            {Math.round(d.confidence * 100)}% Conf
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="empty-selection-panel">
+              <Cpu size={48} className="text-muted mb-3 opacity-40" />
+              <h3 className="text-base font-semibold">No Model Selected</h3>
+              <p className="text-xs text-muted max-w-sm text-center">
+                Select an attached model from the library or drag & drop a new model directory to configure parameters.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

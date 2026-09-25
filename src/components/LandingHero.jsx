@@ -7,7 +7,7 @@ import { ChitravitsEmblem } from './ui/ChitravitsLogo';
 import { SUGGESTED_QUERIES } from '../data/mockData';
 import { uploadImagery } from '../lib/apiClient';
 
-export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUploaded }) {
+export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUploaded, activeModel, activeProject, onNavigateScreen }) {
   const [prompt, setPrompt] = useState('');
   // New Chat remounts this screen; an upload still in flight from the old
   // instance must not then navigate the user out of their new chat.
@@ -99,6 +99,34 @@ export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUpl
           <span className="highlight-dark">Ask in Natural Language.</span>
         </span>
       </h1>
+
+      {/* Active Model / Project Pill Indicators */}
+      {(activeModel || activeProject) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, margin: '-10px 0 20px', flexWrap: 'wrap' }}>
+          {activeModel && (
+            <div 
+              onClick={() => onNavigateScreen?.('model-attach')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 14px', borderRadius: 'var(--radius-full)', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', cursor: 'pointer', fontSize: '0.78rem' }}
+              title="Click to manage custom models"
+            >
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px #10b981' }} />
+              <span style={{ color: 'var(--text-muted)' }}>Attached Model:</span>
+              <strong style={{ color: '#10b981' }}>{activeModel.name}</strong>
+            </div>
+          )}
+          {activeProject && (
+            <div 
+              onClick={() => onNavigateScreen?.('projects')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 14px', borderRadius: 'var(--radius-full)', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)', cursor: 'pointer', fontSize: '0.78rem' }}
+              title="Click to open active project workspace"
+            >
+              <span>{activeProject.icon || '📁'}</span>
+              <span style={{ color: 'var(--text-muted)' }}>Project:</span>
+              <strong style={{ color: '#3b82f6' }}>{activeProject.name}</strong>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Drag & Drop Upload Zone */}
       <div 
