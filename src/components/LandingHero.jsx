@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileUp, Sparkles, ArrowRight, CheckCircle2,
   Satellite, Layers, Database, Compass
@@ -7,8 +7,15 @@ import { ChitravitsEmblem } from './ui/ChitravitsLogo';
 import { SUGGESTED_QUERIES } from '../data/mockData';
 import { uploadImagery } from '../lib/apiClient';
 
-export function LandingHero({ onStartAnalysis, onStartConversation }) {
+export function LandingHero({ onStartAnalysis, onStartConversation, onImageryUploaded }) {
   const [prompt, setPrompt] = useState('');
+  // New Chat remounts this screen; an upload still in flight from the old
+  // instance must not then navigate the user out of their new chat.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isValidating, setIsValidating] = useState(false);
@@ -52,10 +59,11 @@ export function LandingHero({ onStartAnalysis, onStartConversation }) {
       previewUrl: previewUrl
     };
 
-    // Real upload to Supabase Storage (bucket: Satquery) via FastAPI, into a
-    // new conversation (titled "New Chat" -- the filename never becomes the
-    // title). The "Parsing GeoTIFF Metadata..." loading state covers this
-    // real network call. If it fails, imageryId stays null and the chat
+    // Real upload to Supabase Storage (bucket: Satquery) via FastAPI. This is
+    // the first persisted action of a new chat, so the conversation record is
+    // created here (titled "New Chat" -- the filename never becomes the
+    // title). The "Parsing GeoTIFF Metadata..." loading state covers these
+    // real network calls. If they fail, imageryId stays null and the chat
     // shows the honest upload error.
     try {
       const conversationId = await onStartConversation();
@@ -63,10 +71,12 @@ export function LandingHero({ onStartAnalysis, onStartConversation }) {
       console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
       filePayload.imageryId = result.id;
       filePayload.conversationId = conversationId;
+      onImageryUploaded?.();
     } catch (err) {
       console.error('[SatQuery] Image upload to backend failed:', err);
     }
 
+    if (!isMountedRef.current) return;
     setUploadedFile(filePayload);
     setIsValidating(false);
     // Only a query the user actually typed is submitted; an upload alone
@@ -132,10 +142,10 @@ export function LandingHero({ onStartAnalysis, onStartConversation }) {
             <div className="dropzone-icon-box">
               <Upload size={30} />
             </div>
-            <h3 style={{ fontSize: '1.2rem', marginBottom: 6 }}>
+            <h3 style={{ fontSize: '1.2rem', marginBottom: 4 }}>
               Drag & Drop your Satellite Scene here
             </h3>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: 16 }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: 10 }}>
               Supports GeoTIFF, Multi-spectral TIFF, PNG, or JPEG up to 50 MB
             </p>
             <div style={{ display: 'inline-flex', gap: 10 }}>
@@ -154,7 +164,7 @@ export function LandingHero({ onStartAnalysis, onStartConversation }) {
       </div>
 
       {/* Prompt Bar Input */}
-      <div className="prompt-bar-wrapper" style={{ width: '100%', maxWidth: '780px', marginBottom: 'var(--space-5)' }}>
+      <div className="prompt-bar-wrapper" style={{ width: '100%', maxWidth: '780px', marginBottom: 'clamp(10px, 2vh, 20px)' }}>
         <div className="prompt-input-row">
           <Sparkles size={20} style={{ color: 'var(--accent)', marginLeft: 8 }} />
           <textarea
@@ -181,7 +191,7 @@ export function LandingHero({ onStartAnalysis, onStartConversation }) {
       </div>
 
       {/* Suggested Query Chips */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 1.2vh, 10px)' }}>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
           Suggested Remote Sensing Inquiries
         </div>

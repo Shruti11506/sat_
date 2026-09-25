@@ -151,11 +151,53 @@ def test_detail_returns_uploads_and_queries_oldest_first(client):
 def test_list_conversations_most_recently_active_first(client):
     first = _new_conversation(client)["id"]
     second = _new_conversation(client)["id"]
-    # Activity in the first conversation bumps it above the second.
+    _upload(client, second)
+    # Later activity in the first conversation bumps it above the second.
     _upload(client, first)
 
     ids = [c["id"] for c in client.get("/api/v1/conversations").json()["data"]]
     assert ids == [first, second]
+
+
+def test_empty_conversations_are_not_listed(client):
+    empty = _new_conversation(client)["id"]
+    uploaded = _new_conversation(client)["id"]
+    _upload(client, uploaded)
+    asked = _new_conversation(client)["id"]
+    imagery_id = _upload(client, asked).json()["data"]["id"]
+    _ask(client, asked, imagery_id, "Highlight water bodies")
+
+    ids = {c["id"] for c in client.get("/api/v1/conversations").json()["data"]}
+    assert ids == {uploaded, asked}
+    # Still stored and reachable directly -- hidden, not deleted.
+    assert client.get(f"/api/v1/conversations/{empty}").status_code == 200
+
+
+def _age(fake_supabase, conversation_id, minutes):
+    from datetime import datetime, timedelta, timezone
+
+    row = next(r for r in fake_supabase.store["conversations"] if r["id"] == conversation_id)
+    row["created_at"] = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def test_purge_empty_conversations_dry_run_then_apply(client, fake_supabase):
+    from app.services.conversation_service import purge_empty_conversations
+
+    old_empty = _new_conversation(client)["id"]
+    recent_empty = _new_conversation(client)["id"]
+    old_started = _new_conversation(client)["id"]
+    _upload(client, old_started)
+    _age(fake_supabase, old_empty, 120)
+    _age(fake_supabase, old_started, 120)
+
+    assert [r["id"] for r in purge_empty_conversations(60)] == [old_empty]
+    assert client.get(f"/api/v1/conversations/{old_empty}").status_code == 200  # dry run
+
+    assert [r["id"] for r in purge_empty_conversations(60, apply=True)] == [old_empty]
+    assert client.get(f"/api/v1/conversations/{old_empty}").status_code == 404
+    # A recent empty one may have its first upload in flight; never touched.
+    assert client.get(f"/api/v1/conversations/{recent_empty}").status_code == 200
+    assert client.get(f"/api/v1/conversations/{old_started}").status_code == 200
 
 
 def test_unknown_conversation_is_404(client):

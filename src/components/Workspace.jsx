@@ -18,7 +18,7 @@ const QUICK_SUGGESTIONS = [
 
 const LAST_IMAGERY_KEY = 'satquery-last-imagery-id';
 
-export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted, onEnsureConversation }) {
+export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubmitted, onEnsureConversation, onImageryUploaded }) {
   const [messages, setMessages] = useState(scenario.chatHistory || []);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -215,6 +215,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
           });
           console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
           settle({ imageryId: result.id });
+          onImageryUploaded?.();
           if (scenario.isLegacy) {
             try {
               localStorage.setItem(LAST_IMAGERY_KEY, result.id);

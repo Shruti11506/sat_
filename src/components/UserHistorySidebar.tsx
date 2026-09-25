@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { createPortal } from "react-dom"
 import {
   SquarePen,
   Image as ImageIcon,
@@ -20,7 +21,8 @@ import {
   AlertCircle,
   RefreshCw,
   Pencil,
-  Trash2
+  Trash2,
+  LogOut
 } from "lucide-react"
 
 import {
@@ -141,14 +143,67 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
   const [isEditing, setIsEditing] = React.useState(false)
   const [draft, setDraft] = React.useState(entry.title)
   const menuRef = React.useRef<HTMLDivElement>(null)
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  const [menuPos, setMenuPos] = React.useState<{ top: number; left: number } | null>(null)
+
+  // Portaled to <body> and positioned from the clicked row's rect -- the
+  // sidebar's scroll container (overflow-auto) would otherwise clip an in-flow
+  // popup. Opens just outside the sidebar's right edge, top-aligned with the
+  // row; flips upward / to the left when the viewport has no room.
+  const MENU_GAP = 8
+  const VIEWPORT_MARGIN = 8
+
+  const updateMenuPos = React.useCallback(() => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const triggerRect = trigger.getBoundingClientRect()
+    const rowRect = (trigger.closest("li") ?? trigger).getBoundingClientRect()
+    const sidebarRight = trigger.closest('[data-sidebar="sidebar"]')?.getBoundingClientRect().right ?? triggerRect.right
+    // offsetWidth/Height ignore the zoom-in transform, so this is the settled size.
+    const width = menuRef.current?.offsetWidth ?? 212
+    const height = menuRef.current?.offsetHeight ?? 88
+    const maxLeft = window.innerWidth - width - VIEWPORT_MARGIN
+    const maxTop = window.innerHeight - height - VIEWPORT_MARGIN
+
+    let left = Math.max(triggerRect.right, sidebarRight) + MENU_GAP
+    if (left > maxLeft) left = triggerRect.left - MENU_GAP - width
+    left = Math.min(Math.max(left, VIEWPORT_MARGIN), maxLeft)
+
+    let top = rowRect.top
+    if (top > maxTop) top = rowRect.bottom - height
+    top = Math.min(Math.max(top, VIEWPORT_MARGIN), maxTop)
+
+    setMenuPos({ top, left })
+  }, [])
+
+  React.useLayoutEffect(() => {
+    if (!isMenuOpen) {
+      setMenuPos(null)
+      return
+    }
+    updateMenuPos()
+    window.addEventListener("resize", updateMenuPos)
+    window.addEventListener("scroll", updateMenuPos, true)
+    return () => {
+      window.removeEventListener("resize", updateMenuPos)
+      window.removeEventListener("scroll", updateMenuPos, true)
+    }
+  }, [isMenuOpen, updateMenuPos])
 
   React.useEffect(() => {
     if (!isMenuOpen) return
     const close = (e: MouseEvent) => {
       if (!menuRef.current?.contains(e.target as Node)) onOpenMenu(null)
     }
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onOpenMenu(null)
+    }
     document.addEventListener("mousedown", close)
-    return () => document.removeEventListener("mousedown", close)
+    document.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("mousedown", close)
+      document.removeEventListener("keydown", closeOnEscape)
+    }
   }, [isMenuOpen, onOpenMenu])
 
   const commitRename = async () => {
@@ -196,6 +251,7 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
       {entry.kind === "conversation" && (
         <>
           <SidebarMenuAction
+            ref={triggerRef}
             showOnHover
             className="top-2"
             data-state={isMenuOpen ? "open" : "closed"}
@@ -209,36 +265,45 @@ function ConversationRow({ entry, isActive, isMenuOpen, onOpenMenu, onSelect, on
             <MoreHorizontal />
           </SidebarMenuAction>
 
-          {isMenuOpen && (
+          {isMenuOpen && createPortal(
+            // Rendered hidden for one layout pass so its real size can be measured.
+            // Explicit hsl(var(--sidebar-*)) colors: Tailwind 4 doesn't load
+            // tailwind.config.js, so bg-sidebar / text-sidebar-* generate nothing
+            // and the menu was see-through over the image viewer.
+            // z-[200]: above the workspace header (100), below modals (999).
+            // transition-none: duration-150 alone would transition `all`, sliding
+            // the menu in from its hidden measuring spot at 0,0.
             <div
               ref={menuRef}
               role="menu"
-              className="absolute right-1 top-9 z-50 min-w-32 rounded-lg border border-sidebar-border bg-sidebar p-1 shadow-lg"
+              style={menuPos ? { top: menuPos.top, left: menuPos.left } : { top: 0, left: 0, visibility: "hidden" }}
+              className="fixed z-[200] flex w-[212px] flex-col gap-1 rounded-[11px] border border-[rgba(148,163,184,0.28)] bg-[hsl(var(--sidebar-background))] p-2 shadow-[0_12px_30px_rgba(0,0,0,0.45),0_0_0_1px_rgba(59,130,246,0.05)] animate-in fade-in-0 zoom-in-95 duration-150 transition-none"
             >
               <button
                 role="menuitem"
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground hover:bg-sidebar-accent"
+                className="flex h-11 w-full items-center gap-3 rounded-[8px] px-3.5 text-sm text-[hsl(var(--sidebar-foreground)/0.95)] transition-colors duration-100 hover:bg-blue-500/10"
                 onClick={() => {
                   onOpenMenu(null)
                   setDraft(entry.title)
                   setIsEditing(true)
                 }}
               >
-                <Pencil className="w-3.5 h-3.5" />
+                <Pencil className="w-4 h-4 text-[hsl(var(--sidebar-foreground)/0.7)]" />
                 <span>Rename</span>
               </button>
               <button
                 role="menuitem"
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-red-400 hover:bg-sidebar-accent"
+                className="flex h-11 w-full items-center gap-3 rounded-[8px] px-3.5 text-sm text-red-400/90 transition-colors duration-100 hover:bg-red-500/10 hover:text-red-400"
                 onClick={() => {
                   onOpenMenu(null)
                   onDelete(entry.conversation)
                 }}
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-4 h-4" />
                 <span>Delete</span>
               </button>
-            </div>
+            </div>,
+            document.body
           )}
         </>
       )}
@@ -267,6 +332,64 @@ export function UserHistorySidebar({
   const [openMenuKey, setOpenMenuKey] = React.useState<string | null>(null)
   const { isMobile, setOpenMobile } = useSidebar()
   const hasLoadedRef = React.useRef(false)
+
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = React.useState(false)
+  const profileTriggerRef = React.useRef<HTMLButtonElement>(null)
+  const profileMenuRef = React.useRef<HTMLDivElement>(null)
+  const [profileMenuPos, setProfileMenuPos] = React.useState<{ top: number; left: number } | null>(null)
+
+  // Portaled to <body> and positioned to the right of the trigger's rect -- the
+  // sidebar's scroll container (overflow-auto) would otherwise clip an in-flow popup.
+  const PROFILE_MENU_WIDTH = 225
+  const PROFILE_MENU_HEIGHT = 205
+  const PROFILE_MENU_GAP = 10
+
+  const updateProfileMenuPos = React.useCallback(() => {
+    const rect = profileTriggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    let left = rect.right + PROFILE_MENU_GAP
+    let top = rect.bottom - PROFILE_MENU_HEIGHT
+    if (left + PROFILE_MENU_WIDTH > window.innerWidth - 8) left = window.innerWidth - PROFILE_MENU_WIDTH - 8
+    if (left < 8) left = 8
+    if (top < 8) top = 8
+    if (top + PROFILE_MENU_HEIGHT > window.innerHeight - 8) top = window.innerHeight - PROFILE_MENU_HEIGHT - 8
+    setProfileMenuPos({ top, left })
+  }, [])
+
+  React.useLayoutEffect(() => {
+    if (!isProfileMenuOpen) {
+      setProfileMenuPos(null)
+      return
+    }
+    updateProfileMenuPos()
+    window.addEventListener("resize", updateProfileMenuPos)
+    window.addEventListener("scroll", updateProfileMenuPos, true)
+    return () => {
+      window.removeEventListener("resize", updateProfileMenuPos)
+      window.removeEventListener("scroll", updateProfileMenuPos, true)
+    }
+  }, [isProfileMenuOpen, updateProfileMenuPos])
+
+  React.useEffect(() => {
+    if (!isProfileMenuOpen) return
+    const close = (e: MouseEvent) => {
+      if (
+        !profileMenuRef.current?.contains(e.target as Node) &&
+        !profileTriggerRef.current?.contains(e.target as Node)
+      ) {
+        setIsProfileMenuOpen(false)
+      }
+    }
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsProfileMenuOpen(false)
+    }
+    document.addEventListener("mousedown", close)
+    document.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("mousedown", close)
+      document.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [isProfileMenuOpen])
 
   const fetchHistory = React.useCallback(() => {
     // Only the very first load shows "Loading…"; refreshes (e.g. a title
@@ -536,7 +659,12 @@ export function UserHistorySidebar({
 
           {/* User Profile Tile */}
           <SidebarMenuItem className="mt-2 pt-2 border-t border-sidebar-border/40">
-            <SidebarMenuButton className="w-full justify-between gap-3 h-12 hover:bg-sidebar-accent rounded-lg p-2">
+            <SidebarMenuButton
+              ref={profileTriggerRef}
+              data-state={isProfileMenuOpen ? "open" : "closed"}
+              onClick={() => setIsProfileMenuOpen((open) => !open)}
+              className="w-full justify-between gap-3 h-12 hover:bg-sidebar-accent rounded-lg p-2"
+            >
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className="w-7 h-7 rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm">
                   SD
@@ -555,6 +683,78 @@ export function UserHistorySidebar({
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
+
+      {isProfileMenuOpen && profileMenuPos && createPortal(
+        <div
+          ref={profileMenuRef}
+          role="menu"
+          style={{ top: profileMenuPos.top, left: profileMenuPos.left }}
+          className="fixed z-[9999] flex w-[225px] flex-col rounded-[9px] border border-[rgba(148,163,184,0.16)] bg-[#080d18] p-1.5 shadow-[0_10px_25px_rgba(0,0,0,0.35)] animate-in fade-in-0 slide-in-from-left-1 duration-150"
+        >
+          <div className="flex items-center gap-2.5 px-2.5 py-2.5">
+            <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0 shadow-sm">
+              SD
+            </div>
+            <div className="flex flex-col items-start min-w-0 leading-tight">
+              <span className="text-[13px] font-semibold text-white truncate">
+                Shruti Daware
+              </span>
+              <span className="text-[11px] text-[#94a3b8]">
+                ISRO Remote Sensing Lab
+              </span>
+            </div>
+          </div>
+
+          <div className="my-1 border-t border-[rgba(148,163,184,0.12)]" />
+
+          <div className="flex flex-col gap-0.5 py-1">
+            <button
+              role="menuitem"
+              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
+              onClick={() => setIsProfileMenuOpen(false)}
+            >
+              <User className="w-4 h-4 text-[#cbd5e1]" />
+              <span>Profile</span>
+            </button>
+            <button
+              role="menuitem"
+              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
+              onClick={() => {
+                setIsProfileMenuOpen(false)
+                onToggleTheme()
+              }}
+            >
+              <Settings className="w-4 h-4 text-[#cbd5e1]" />
+              <span>Settings</span>
+            </button>
+            <button
+              role="menuitem"
+              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#e5e7eb] transition-colors duration-150 hover:bg-blue-500/[0.08]"
+              onClick={() => {
+                setIsProfileMenuOpen(false)
+                onNavigateScreen("report")
+              }}
+            >
+              <Sparkles className="w-4 h-4 text-blue-400" />
+              <span>Upgrade Plan</span>
+            </button>
+          </div>
+
+          <div className="my-1 border-t border-[rgba(148,163,184,0.12)]" />
+
+          <div className="py-1">
+            <button
+              role="menuitem"
+              className="flex h-9 w-full items-center gap-[9px] rounded-[7px] px-2.5 text-[13px] text-[#ef4444] transition-colors duration-150 hover:bg-red-500/[0.08]"
+              onClick={() => setIsProfileMenuOpen(false)}
+            >
+              <LogOut className="w-4 h-4 text-[#ef4444]" />
+              <span>Sign Out</span>
+            </button>
+          </div>
+        </div>,
+        document.body
+      )}
     </Sidebar>
   )
 }

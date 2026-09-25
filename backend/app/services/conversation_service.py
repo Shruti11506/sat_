@@ -46,8 +46,35 @@ def create_conversation() -> dict:
     return response.data[0]
 
 
+def _ids_with_content(conversation_ids: list[str]) -> set[str]:
+    """The subset of `conversation_ids` that has at least one upload or query."""
+    if not conversation_ids:
+        return set()
+    client = get_supabase()
+    found: set[str] = set()
+    for table in ("imagery", "analysis_jobs"):
+        try:
+            response = execute_read(
+                client.table(table)
+                .select("conversation_id")
+                .in_("conversation_id", conversation_ids)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Supabase read failed for %s conversation ids", table)
+            raise SupabaseError("Failed to list conversations.") from exc
+        found.update(row["conversation_id"] for row in response.data or [])
+    return found
+
+
 def list_conversations(limit: int = 100) -> list[dict]:
-    """Most recently active first (updated_at is bumped by uploads and queries)."""
+    """Started conversations, most recently active first.
+
+    updated_at is bumped by uploads and queries. A conversation with no upload
+    and no query yet is not listed: the frontend creates the row only on the
+    first upload, so an empty one is either that upload still in flight or a
+    blank "New Chat" left by the old eager-create behaviour (see
+    `purge_empty_conversations`).
+    """
     client = get_supabase()
     try:
         response = execute_read(
@@ -56,7 +83,48 @@ def list_conversations(limit: int = 100) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Supabase list failed for conversations")
         raise SupabaseError("Failed to list conversations.") from exc
-    return response.data or []
+    rows = response.data or []
+    started = _ids_with_content([row["id"] for row in rows])
+    return [row for row in rows if row["id"] in started]
+
+
+def purge_empty_conversations(older_than_minutes: int = 60, apply: bool = False) -> list[dict]:
+    """Find (and, with apply=True, delete) conversations with no uploads and no queries.
+
+    Only rows older than `older_than_minutes` qualify, so a conversation
+    whose first upload is still in flight is never touched. Each row is
+    re-checked immediately before its delete; the imagery/analysis_jobs
+    foreign keys (no ON DELETE action) would also make the delete fail if
+    content arrived in between. Returns the matching rows.
+    """
+    client = get_supabase()
+    cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
+    try:
+        rows = execute_read(client.table(TABLE).select("*")).data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Supabase list failed for conversations")
+        raise SupabaseError("Failed to list conversations.") from exc
+
+    old = [
+        row for row in rows
+        if datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).timestamp() < cutoff
+    ]
+    started = _ids_with_content([row["id"] for row in old])
+    empty = [row for row in old if row["id"] not in started]
+    if not apply:
+        return empty
+
+    purged = []
+    for row in empty:
+        if _ids_with_content([row["id"]]):
+            continue
+        try:
+            client.table(TABLE).delete().eq("id", row["id"]).execute()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not delete empty conversation %s", row["id"])
+            continue
+        purged.append(row)
+    return purged
 
 
 def get_conversation(conversation_id: str) -> dict:

@@ -8,7 +8,9 @@ For the full, evidence-backed audit (feature inventory, bug table, dummy-data lo
 
 ```bash
 # Frontend (repo root)
-npm run dev       # Vite dev server, http://localhost:5173
+npm run dev       # Vite dev server, http://localhost:5173 — ALSO starts the FastAPI backend on :8000
+                  # (vite.config.js `satqueryBackend` plugin; reuses one already on :8000; stops with Vite;
+                  # no --reload, so restart `npm run dev` after backend edits; opt out: SATQUERY_SKIP_BACKEND=1)
 npm run build     # production build -> dist/ (does NOT type-check .tsx; there is no tsc step)
 npm run preview   # preview the production build
 npm run lint      # oxlint (.oxlintrc.json); ~63 pre-existing warnings, mostly unused imports
@@ -22,7 +24,7 @@ cd backend
 python -m venv .venv && .venv\Scripts\activate           # first time (Windows; source .venv/bin/activate elsewhere)
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000                  # http://localhost:8000/docs
-pytest -v                                                  # 84 tests, in-memory fake Supabase, no network
+pytest -v                                                  # 84 + test_orchestrator.py tests, in-memory fake Supabase, no network
 pytest tests/test_imagery_upload.py::test_upload_imagery_success -v   # single test
 docker compose up --build                                  # UNVERIFIED: never successfully run on this machine
 ```
@@ -31,7 +33,7 @@ The frontend calls `http://localhost:8000/api/v1` by default, so the backend mus
 
 **"Unable to load conversation history." — diagnose in this order** (all of these have happened):
 1. **Which origin is the page on?** `npm run dev` silently moves to `5174`, `5175`, … when `5173` is taken, and several stale Vite servers from this folder can be running at once (`Get-NetTCPConnection -State Listen` → ports 5173+). A browser origin the backend doesn't allow gets `OPTIONS … 400 "Disallowed CORS origin"` and every API call fails with `TypeError: Failed to fetch`. Fixed for development: when `APP_ENV=development`, `core/config.py::cors_origin_regex` also allows any `http://localhost|127.0.0.1|[::1]:<port>`. Production uses only the explicit `CORS_ORIGINS` list.
-2. **Is the backend up and on current code?** (see above).
+2. **Is the backend up and on current code?** (see above). This was the cause after every machine/session restart (confirmed three times): the data was safe in Supabase, but `npm run dev` (and `.claude/launch.json`, which runs it) started only Vite, so nothing started uvicorn. Symptom: `ERR_CONNECTION_REFUSED` on `:8000`, no python process. Fixed: `npm run dev` now starts the backend too (see Commands); if it can't (no `backend/.venv`), Vite's log says `[satquery] backend NOT started`. Fixed: the backend used to load `.env` relative to the working directory, so a uvicorn started outside `backend/` (e.g. from the repo root) ran with no Supabase credentials and history returned 500 "Supabase is not configured". `core/config.py` now anchors it to `backend/.env` (`tests/test_config.py`).
 3. **Is the schema migrated?** (see above).
 4. Transient: Supabase drops the pooled HTTP/2 connection after idle (`httpx.RemoteProtocolError: Server disconnected`). Sidebar reads go through `db/supabase.py::execute_read`, which retries a read once — use it for new read paths too; never for writes.
 
@@ -64,6 +66,8 @@ backend/app/services/       imagery_, analysis_, job_, result_, storage_service 
 backend/app/schemas/        Pydantic models incl. the ApiResponse envelope (common.py)
 backend/app/db/supabase.py  single cached Supabase client (service-role key)
 backend/app/core/           config (env), exceptions, logging, security
+backend/app/orchestrator/   LangGraph graph: validate_inputs → route → execute_step (loop) → compose_response
+backend/app/ml/             ModelService contract (contracts.py) + ModelRegistry (registry.py); specialists go in ml/services/
 backend/supabase/           schema.sql (fresh project) + migrations/ (applied manually in the SQL editor)
 ```
 
@@ -86,7 +90,7 @@ Screens navigate via callback props (`onNavigateScreen`, `onGoBack`) passed down
 - [LandingHero.jsx](src/components/LandingHero.jsx)'s `processFile()` uploads the selected file via `POST /api/v1/imagery/upload` (real bytes → Supabase Storage bucket `Satquery` → an `imagery` row) during its existing "Parsing GeoTIFF Metadata..." loading state.
 - `App.handleStartAnalysis` awaits `submitAnalysis()` before navigating into Workspace, so the chat opens already showing the real **"Analysis request submitted." / status: queued** acknowledgment (or an honest error) — never fabricated analysis text.
 - [Workspace.jsx](src/components/Workspace.jsx)'s `handleSendMessage` does the same for a mid-chat query against `backendImageryId` — the chat's most recent upload, kept across messages so follow-ups target the same image. Sending waits for a pending attachment's upload to settle.
-- **Conversations** (`conversations` table, migration `0003`): the sidebar lists conversations, not files. **New Chat** (sidebar button, header logo, "New Analysis") awaits `POST /conversations` via `App.ensureConversation()` and opens it, so it appears in history immediately; the sidebar refreshes only after the insert completes. One record per action: while a creation is in flight, or while the open chat is still an untouched New Chat (`isFreshConversation`), New Chat reuses it instead of piling up blank conversations. The landing-screen upload (`startConversation`) goes into that fresh conversation; reached any other way (e.g. Back from a chat), it starts a new one. Opening or restoring an **empty** conversation lands on the upload screen, not an empty Workspace. App load never creates a conversation. Uploads and queries carry `conversation_id`. Title rules: starts as "New Chat" (`title_source: default`); uploads never change it; after each successful query `App.handleQuerySubmitted` fires `POST /conversations/{id}/title` in the background, which titles it ONCE from the first meaningful stored query (`auto`) via the deterministic keyword matcher `backend/app/services/title_service.py` (no AI — swap that one function when a model exists); a manual rename sets `user` and is never overwritten. Filenames must never become titles.
+- **Conversations** (`conversations` table, migration `0003`): the sidebar lists conversations, not files. **New Chat** (sidebar button, header logo, "New Analysis") only resets frontend state (`App.handleNewChat`: `activeConversation = null`, clears the workspace, remounts `LandingHero` via `landingKey`) and **never writes to the backend**. The conversation row is created lazily by the first upload (`startConversation` on landing, `ensureConversation` mid-chat); concurrent callers share one in-flight `pendingConversationRef` promise, so one chat never gets two records. The sidebar refreshes after the upload lands (`onImageryUploaded`), and `GET /conversations` hides conversations with no imagery and no jobs (the brief window before the upload stores, a failed first upload, or blanks left by the old eager New Chat — purge with `backend/scripts/purge_empty_conversations.py`, dry run unless `--apply`). Reopening/restoring an **empty** conversation lands on the upload screen and the next upload reuses it (`freshConversationIdRef`). A query can't create a conversation on its own: analysis requires an uploaded image, which already created it. App load never creates a conversation. Uploads and queries carry `conversation_id`. Title rules: starts as "New Chat" (`title_source: default`); uploads never change it; after each successful query `App.handleQuerySubmitted` fires `POST /conversations/{id}/title` in the background, which titles it ONCE from the first meaningful stored query (`auto`) via the deterministic keyword matcher `backend/app/services/title_service.py` (no AI — swap that one function when a model exists); a manual rename sets `user` and is never overwritten. Filenames must never become titles.
 - [UserHistorySidebar.tsx](src/components/UserHistorySidebar.tsx) fetches `GET /conversations` + `GET /analysis/history` on mount and on every `refreshToken` bump. Jobs with `conversation_id = NULL` are **legacy** (pre-conversation) chats: shown one per image, titled by their first query, read-only, opened via `App.handleSelectHistoryItem`. Conversations get a hover ⋯ menu (Rename inline / Delete with confirm — deletes its jobs, imagery rows and Storage files). Empty → "No conversations yet.", failure → "Unable to load conversation history." + Retry (re-runs the same two GETs; creates nothing); never sample data. The sidebar renders **only** backend rows — there is no frontend-only "New Chat" placeholder (it was removed because it duplicated the real record New Chat creates); the open conversation is highlighted on both the landing and workspace screens.
 - Refresh persistence: `localStorage['satquery-last-conversation-id']` (or, for legacy chats, `satquery-last-imagery-id`) holds only a pointer — on mount `App.jsx` re-fetches from the backend (`buildConversationScenario()` / `buildLegacyScenario()`); a stale pointer is cleared.
 - An upload with no typed query submits nothing (no default query is invented); the chat waits for the user's first question.
@@ -132,7 +136,7 @@ Dual dark/light theme toggled via a `data-theme` attribute on `<html>`, persiste
 
 ## Rules for this repo
 
-- **No AI/agentic code yet** — no model calls, no LLM/VLM SDKs, no LangChain/LangGraph, no fake answers. Queries only create `queued` jobs.
+- **AI layer boundaries.** LangGraph orchestration lives in `backend/app/orchestrator/` (no model or DB code there); the model contract + registry live in `backend/app/ml/` (no torch/HF imports in `contracts.py`/`registry.py`). The registry is empty until a real model is integrated — tasks then fail with `MODEL_NOT_AVAILABLE`; never register a placeholder that returns text. No LangChain APIs (langchain-core is only a transitive LangGraph dependency). No fake answers: answers, confidences and evidence come only from a `ModelResponse`. The API still only creates `queued` jobs; nothing runs the graph yet (worker = next step).
 - **No fabricated application data** in the primary flow — backend data, an empty state, or a real error; never a fallback to sample data. Static UI copy (headings, placeholders, suggestion chips) is fine.
 - **Never log secrets.** `core/logging.py` silences `httpx`, `httpcore`, `hpack` and `h2`, which print request headers (incl. the service-role key) at DEBUG; `tests/test_logging.py` guards this. Keep it that way when adding HTTP libraries.
 - Don't redesign the UI; functional changes only.

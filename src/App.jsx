@@ -57,7 +57,8 @@ function attachmentFromImagery(imagery) {
   };
 }
 
-// A conversation New Chat created but nothing has been uploaded or asked in yet.
+// A conversation with nothing uploaded or asked in yet (left by the old eager
+// New Chat, or one whose first upload failed).
 function isEmptyConversation(detail) {
   return !detail.imagery?.length && !detail.jobs?.length;
 }
@@ -191,20 +192,27 @@ export function App() {
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const bumpHistory = useCallback(() => setHistoryRefreshToken(t => t + 1), []);
 
-  // The open conversation ({ id, title, title_source }), or null for a fresh
-  // "New Chat" that has no backend record yet. It is created lazily on the
-  // first upload (see ensureConversation) and titled "New Chat" until the
-  // first meaningful query -- an uploaded filename never becomes its title.
+  // The open conversation ({ id, title, title_source }), or null for a new,
+  // unsaved chat. New Chat never writes to the backend: the record is created
+  // lazily by the first upload, just before the file is stored (see
+  // ensureConversation). If that upload then fails, the empty row is hidden
+  // by GET /conversations and purgeable (backend/scripts/purge_empty_conversations.py).
+  // It's titled "New Chat" until the first
+  // meaningful query -- an uploaded filename never becomes its title.
   const [activeConversation, setActiveConversation] = useState(null);
   const activeConversationRef = useRef(null);
   const pendingConversationRef = useRef(null);
-  // The conversation New Chat created (or an empty one that was reopened) and
-  // the ids an upload has since been started into. A conversation is "fresh"
-  // -- reusable by New Chat and the landing upload -- only while it's in the
-  // first and not the second. A Set rather than a flag, so the check doesn't
-  // depend on which awaiting caller resumes first.
+  // An EMPTY conversation that was reopened (one left behind by the old
+  // eager New Chat, restored on refresh) and the ids an upload has since been
+  // started into. It's "fresh" -- reusable by the landing upload instead of
+  // creating another record -- only while it's in the first and not the
+  // second. A Set rather than a flag, so the check doesn't depend on which
+  // awaiting caller resumes first.
   const freshConversationIdRef = useRef(null);
   const usedConversationIdsRef = useRef(new Set());
+  // Bumped by New Chat to remount LandingHero, clearing its typed query and
+  // selected file even when the landing screen is already showing.
+  const [landingKey, setLandingKey] = useState(0);
 
   const openConversation = useCallback((conversation) => {
     const value = conversation
@@ -216,16 +224,17 @@ export function App() {
     rememberPointer(LAST_CONVERSATION_KEY, value?.id);
   }, []);
 
-  // Returns the open conversation's id, creating it on first use. Concurrent
-  // callers share one in-flight request so a chat never gets two records.
+  // Returns the open conversation's id, creating it on first use (the first
+  // upload). Concurrent callers share one in-flight request so a chat never
+  // gets two records. The sidebar isn't refreshed here but once the upload
+  // lands (onImageryUploaded), so it never shows a conversation with nothing in it.
   const ensureConversation = useCallback(async () => {
     if (activeConversationRef.current) return activeConversationRef.current.id;
     if (!pendingConversationRef.current) {
       const pending = createConversation().then((conversation) => {
-        if (pendingConversationRef.current === pending) {
-          openConversation(conversation);
-          bumpHistory();
-        }
+        // Not opened if New Chat was clicked meanwhile -- the upload still
+        // goes into it, but the user has moved on to a new chat.
+        if (pendingConversationRef.current === pending) openConversation(conversation);
         return conversation.id;
       });
       pending.catch(() => {
@@ -234,7 +243,7 @@ export function App() {
       pendingConversationRef.current = pending;
     }
     return pendingConversationRef.current;
-  }, [openConversation, bumpHistory]);
+  }, [openConversation]);
 
   const isFreshConversation = useCallback((conversation) =>
     Boolean(conversation)
@@ -246,10 +255,10 @@ export function App() {
     return conversationId;
   }, []);
 
-  // Landing-screen upload. Reuses the conversation New Chat just created
-  // (still being created, or created but still empty) so one New Chat maps to
-  // exactly one conversation; otherwise -- e.g. landing reached via Back from
-  // a chat -- it begins a NEW conversation, as before.
+  // Landing-screen upload: the point where a new chat is first persisted.
+  // Reuses a creation already in flight, or a reopened empty conversation;
+  // otherwise -- after New Chat, or landing reached via Back from a chat --
+  // it creates a NEW conversation.
   const startConversation = useCallback(async () => {
     if (pendingConversationRef.current) {
       return markConversationUsed(await pendingConversationRef.current);
@@ -311,7 +320,7 @@ export function App() {
           const detail = await getConversation(lastConversationId);
           openConversation(detail);
           if (isEmptyConversation(detail)) {
-            // An untouched New Chat: stay on the upload screen, and let the
+            // An empty conversation: stay on the upload screen, and let the
             // next upload go into this conversation instead of a new one.
             freshConversationIdRef.current = detail.id;
             return;
@@ -441,24 +450,17 @@ export function App() {
     navigateToScreen('workspace');
   };
 
-  // New Chat creates a real conversation record (POST /conversations), then
-  // opens it; ensureConversation refreshes the sidebar only once the insert
-  // has completed. Exactly one record per action: a click while one is being
-  // created, or while the open chat is still an untouched New Chat, reuses it
-  // instead of piling up blank conversations.
-  const handleNewChat = async () => {
+  // New Chat only resets frontend state -- it never writes to the backend.
+  // The conversation record is created by the first upload (startConversation
+  // / ensureConversation), so clicking it any number of times persists nothing.
+  const handleNewChat = () => {
+    openConversation(null); // also drops any creation still in flight
+    freshConversationIdRef.current = null;
     rememberPointer(LAST_IMAGERY_KEY, null);
-    navigateToScreen('landing');
-    if (pendingConversationRef.current || isFreshConversation(activeConversationRef.current)) return;
-
-    openConversation(null);
-    try {
-      freshConversationIdRef.current = await ensureConversation();
-    } catch (err) {
-      // Nothing is faked: the chat stays unsaved, and the next upload retries
-      // the creation and reports the real error if it fails again.
-      console.error('[SatQuery] Could not create a new conversation:', err);
-    }
+    setWorkspaceScenario(null);
+    setLandingKey(k => k + 1);
+    setHistoryStack([]);
+    setActiveScreen('landing');
   };
 
   // Sidebar conversation -> reload its real uploads + queries from the backend.
@@ -616,8 +618,10 @@ export function App() {
           <main style={{ flex: 1, position: 'relative', zIndex: 1 }}>
             {activeScreen === 'landing' && (
               <LandingHero
+                key={landingKey}
                 onStartAnalysis={handleStartAnalysis}
                 onStartConversation={startConversation}
+                onImageryUploaded={bumpHistory}
               />
             )}
 
@@ -628,6 +632,7 @@ export function App() {
                 onGoBack={handleGoBack}
                 onEnsureConversation={ensureConversationForUpload}
                 onAnalysisSubmitted={handleQuerySubmitted}
+                onImageryUploaded={bumpHistory}
               />
             )}
 

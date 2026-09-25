@@ -1,11 +1,18 @@
 """Application configuration, loaded from environment variables."""
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# backend/.env, resolved from this file rather than the working directory: a
+# relative ".env" silently loaded nothing when uvicorn was started from any
+# other folder (e.g. the repo root), leaving Supabase unconfigured. Real
+# environment variables (e.g. Docker's env_file) still take precedence.
+BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=BACKEND_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     APP_NAME: str = "SatQuery Backend"
     APP_VERSION: str = "0.1.0"

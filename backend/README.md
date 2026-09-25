@@ -157,7 +157,7 @@ The `/health/*` connectivity checks are the exception — they put status in `da
 | GET | `/api/v1/health/supabase` | Verifies the Supabase client, database, **and** the `Satquery` Storage bucket in one call |
 | GET | `/api/v1/health/storage` | Storage-only version of the same check |
 | POST | `/api/v1/conversations` | Create a conversation titled "New Chat" (`title_source: default`) |
-| GET | `/api/v1/conversations?limit=100` | List conversations, most recently active (`updated_at`) first — the sidebar's data source |
+| GET | `/api/v1/conversations?limit=100` | List **started** conversations (at least one upload or query), most recently active (`updated_at`) first — the sidebar's data source. Empty ones are hidden, not deleted; `python scripts/purge_empty_conversations.py [--apply]` removes those older than an hour (dry run by default) |
 | GET | `/api/v1/conversations/{id}` | Conversation + its `imagery` (with fresh `url`) and `jobs`, oldest first |
 | PATCH | `/api/v1/conversations/{id}` | Rename (`{"title"}`); sets `title_source: user`, never auto-overwritten |
 | POST | `/api/v1/conversations/{id}/title` | Title from the FIRST meaningful stored query (deterministic keywords, `services/title_service.py`, no AI). No-op once `auto`/`user` |
