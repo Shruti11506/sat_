@@ -11,10 +11,17 @@ import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { ReportScreen } from './components/ReportScreen';
 import { ProfileDashboard } from './components/ProfileDashboard';
 import { SettingsPage } from './components/SettingsPage';
+import { ModelAttachmentScreen } from './components/ModelAttachmentScreen';
+import { ProjectsScreen } from './components/ProjectsScreen';
+import './components/ModelAndProjects.css';
+import { executeThemeTransition } from './lib/themeTransition';
+import { ThemeTransitionWave } from './components/ui/ThemeTransitionPattern';
 import { GradientBackground } from './components/ui/oceanic-shimmer';
 import { SATELLITE_SCENARIOS } from './data/mockData';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { UserHistorySidebar } from './components/UserHistorySidebar';
+import { getActiveModel, setActiveModelId } from './lib/modelsStorage';
+import { getActiveProject, getStoredProjects, setActiveProjectId, addChatToProject } from './lib/projectsStorage';
 import { getImageryPreviewUrl, getImageryGeo, getPreviewNote, makePairAttachment } from './lib/filePreview';
 import {
   getImagery,
@@ -207,10 +214,12 @@ function buildLegacyScenario(imagery, historyItemsForImage = []) {
 export function App() {
   // Theme preference ('dark' | 'light' | 'system', saved in user_settings) and
   // the theme actually shown. 'system' follows the OS setting live.
-  const [themePreference, setThemePreference] = useState(() => readPointer(THEME_KEY) || 'dark');
+  const [themePreference, setThemePreference] = useState(() => readPointer(THEME_KEY) || localStorage.getItem('satquery-theme') || 'dark');
   const [sidebarDensity, setSidebarDensity] = useState(() => readPointer(DENSITY_KEY) || 'comfortable');
   const [systemPrefersDark, setSystemPrefersDark] = useState(prefersDarkScheme);
   const theme = themePreference === 'system' ? (systemPrefersDark ? 'dark' : 'light') : themePreference;
+  // Patterned theme wavefront state (ISRO satellite + NASA Earth animation)
+  const [themeWave, setThemeWave] = useState(null);
 
   // Active Screen state: 'landing', or the profile/settings screen if it was open before a refresh.
   const initialScreenRef = useRef(
@@ -219,6 +228,30 @@ export function App() {
   const [activeScreen, setActiveScreen] = useState(initialScreenRef.current);
   // Navigation history stack for step-by-step back navigation
   const [historyStack, setHistoryStack] = useState([]);
+
+  // Attached Custom AI Model state (Folder Drag & Drop)
+  const [activeModel, setActiveModel] = useState(() => getActiveModel());
+  // ChatGPT-Style Projects state
+  const [projects, setProjects] = useState(() => getStoredProjects());
+  const [activeProject, setActiveProject] = useState(() => getActiveProject());
+
+  const handleSelectModel = (model) => {
+    setActiveModel(model);
+    setActiveModelId(model ? model.id : null);
+  };
+
+  const handleOpenProject = (project) => {
+    setActiveProject(project);
+    setActiveProjectId(project ? project.id : null);
+    navigateToScreen('projects');
+  };
+
+  const handleStartProjectChat = (project) => {
+    setActiveProject(project);
+    setActiveProjectId(project.id);
+    handleNewChat();
+    navigateToScreen('landing');
+  };
 
   const navigateToScreen = (screenId) => {
     if (screenId !== activeScreen) {
@@ -342,6 +375,10 @@ export function App() {
   const handleQuerySubmitted = useCallback((conversationId) => {
     bumpHistory();
     if (!conversationId) return;
+    if (activeProject) {
+      addChatToProject(activeProject.id, conversationId);
+      setProjects(getStoredProjects());
+    }
     const current = activeConversationRef.current;
     if (current?.id === conversationId && current.title_source !== 'default') return;
     generateConversationTitle(conversationId)
@@ -514,14 +551,20 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally runs once on mount only
   }, []);
 
-  // Header sun/moon: flips the shown theme and saves it as the preference.
-  const toggleTheme = () => {
+  // Header sun/moon: triggers high-speed aerospace theme transition wavefront and updates preferences.
+  const toggleTheme = (e) => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    if (settingsRef.current) {
-      saveSettings({ theme: nextTheme }).catch((err) => console.error('[SatQuery] Could not save theme:', err));
-    } else {
-      setThemePreference(nextTheme); // settings unavailable: applies to this browser only
-    }
+    executeThemeTransition(nextTheme, e, {
+      onThemeUpdate: (t) => {
+        setThemePreference(t);
+        try { localStorage.setItem('satquery-theme', t); } catch {}
+        if (settingsRef.current) {
+          saveSettings({ theme: t }).catch((err) => console.error('[SatQuery] Could not save theme:', err));
+        }
+      },
+      onWaveStart: (wave) => setThemeWave(wave),
+      onWaveEnd: () => setThemeWave(null)
+    });
   };
 
   // Real upload -> real (optional) query flow. No AI response is ever
@@ -679,6 +722,9 @@ export function App() {
 
   return (
     <SidebarProvider defaultOpen={true}>
+      {/* High-Tech Aerospace Theme Transition Wavefront */}
+      <ThemeTransitionWave wave={themeWave} />
+
       {/* ChatGPT-Style User History Sidebar */}
       <UserHistorySidebar
         onNewChat={handleNewChat}
@@ -693,6 +739,12 @@ export function App() {
         refreshToken={historyRefreshToken}
         profileUser={profileUser}
         onOpenProfile={() => navigateToScreen('profile')}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        activeModel={activeModel}
+        projects={projects}
+        activeProjectId={activeProject?.id || null}
+        onOpenProject={handleOpenProject}
         onOpenSettings={() => navigateToScreen('settings')}
       />
 
@@ -704,7 +756,7 @@ export function App() {
                 position: 'absolute', 
                 inset: 0, 
                 opacity: theme === 'light' ? 1 : 0, 
-                transition: 'opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
+                transition: 'opacity 0.38s cubic-bezier(0.16, 1, 0.3, 1)',
                 willChange: 'opacity'
               }}
             >
@@ -715,7 +767,7 @@ export function App() {
                 position: 'absolute', 
                 inset: 0, 
                 opacity: theme === 'dark' ? 1 : 0, 
-                transition: 'opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
+                transition: 'opacity 0.38s cubic-bezier(0.16, 1, 0.3, 1)',
                 willChange: 'opacity'
               }}
             >
@@ -768,6 +820,7 @@ export function App() {
               )}
 
               <button 
+                id="satquery-theme-toggle-btn"
                 className="theme-toggle-btn"
                 onClick={toggleTheme}
                 title={`Switch to ${theme === 'dark' ? 'Light Theme' : 'Dark Theme'}`}
@@ -786,6 +839,25 @@ export function App() {
                 onStartAnalysis={handleStartAnalysis}
                 onStartConversation={startConversation}
                 onImageryUploaded={bumpHistory}
+                activeModel={activeModel}
+                activeProject={activeProject}
+                onNavigateScreen={navigateToScreen}
+              />
+            )}
+
+            {activeScreen === 'model-attach' && (
+              <ModelAttachmentScreen
+                onGoBack={handleGoBack}
+                onSelectModel={handleSelectModel}
+                activeModelId={activeModel?.id}
+              />
+            )}
+
+            {activeScreen === 'projects' && (
+              <ProjectsScreen
+                onGoBack={handleGoBack}
+                onStartProjectChat={handleStartProjectChat}
+                onOpenConversation={handleSelectConversation}
               />
             )}
 
@@ -797,6 +869,8 @@ export function App() {
                 onEnsureConversation={ensureConversationForUpload}
                 onAnalysisSubmitted={handleQuerySubmitted}
                 onImageryUploaded={bumpHistory}
+                activeModel={activeModel}
+                activeProject={activeProject}
               />
             )}
 
