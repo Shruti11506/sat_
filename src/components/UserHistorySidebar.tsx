@@ -368,6 +368,9 @@ export function UserHistorySidebar({
   // entries, and a failed fetch never falls back to stale/sample data.
   const [entries, setEntries] = React.useState<SidebarEntry[]>([])
   const [status, setStatus] = React.useState<"loading" | "ready" | "error">("loading")
+  // The backend's own reason (e.g. backend not running, Supabase not
+  // configured) -- shown under the error so setup problems aren't a mystery.
+  const [errorDetail, setErrorDetail] = React.useState<string | null>(null)
   const [openMenuKey, setOpenMenuKey] = React.useState<string | null>(null)
   const { isMobile, setOpenMobile } = useSidebar()
   const hasLoadedRef = React.useRef(false)
@@ -410,6 +413,7 @@ export function UserHistorySidebar({
       .catch((err) => {
         console.error("[SatQuery] Failed to load conversation history:", err)
         setEntries([])
+        setErrorDetail((err as Error)?.message || null)
         setStatus("error")
         hasLoadedRef.current = false
       })
@@ -577,6 +581,9 @@ export function UserHistorySidebar({
               <AlertCircle className="w-3.5 h-3.5 text-red-400" />
               <span>Unable to load conversation history.</span>
             </div>
+            {errorDetail && (
+              <p className="text-[11px] leading-snug text-sidebar-foreground/55 break-words">{errorDetail}</p>
+            )}
             <button
               onClick={fetchHistory}
               className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"

@@ -50,17 +50,34 @@ class _FlakyQuery:
         return "ok"
 
 
-def test_execute_read_retries_once_after_dropped_connection():
+@pytest.fixture
+def pauses(monkeypatch):
+    slept = []
+    monkeypatch.setattr("app.db.supabase.time.sleep", slept.append)
+    return slept
+
+
+def test_execute_read_retries_after_dropped_connection(pauses):
     query = _FlakyQuery(failures=1)
     assert execute_read(query) == "ok"
     assert query.calls == 2
+    assert pauses == [0.25]  # paused before retrying, so a fresh connection is used
 
 
-def test_execute_read_gives_up_after_second_failure():
+def test_execute_read_survives_two_drops(pauses):
+    # Both concurrent sidebar reads can hit the dying HTTP/2 connection, and
+    # an immediate retry could hit it too (seen on a fresh clone).
     query = _FlakyQuery(failures=2)
+    assert execute_read(query) == "ok"
+    assert query.calls == 3
+    assert pauses == [0.25, 0.75]
+
+
+def test_execute_read_gives_up_after_third_failure(pauses):
+    query = _FlakyQuery(failures=3)
     with pytest.raises(httpx.RemoteProtocolError):
         execute_read(query)
-    assert query.calls == 2
+    assert query.calls == 3
 
 
 def _drop_first_connection(monkeypatch):

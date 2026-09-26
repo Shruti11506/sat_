@@ -49,6 +49,9 @@ def _title(client, conversation_id):
         ("Identify all road networks and industrial clusters", "Road Networks & Industrial Areas"),
         ("Describe this satellite scene in detail", "Scene Description"),
         ("Detect building structures using SAR double-bounce radar backscatter", "SAR Building Detection"),
+        ("Compare these two images.", "Image Comparison"),
+        ("What are the differences between these satellite images?", "Image Comparison"),
+        ("Compare vegetation in both images", "Vegetation Analysis"),
     ],
 )
 def test_generate_conversation_title(query, expected):

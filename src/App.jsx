@@ -15,7 +15,7 @@ import { GradientBackground } from './components/ui/oceanic-shimmer';
 import { SATELLITE_SCENARIOS } from './data/mockData';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { UserHistorySidebar } from './components/UserHistorySidebar';
-import { getImageryPreviewUrl, getImageryGeo } from './lib/filePreview';
+import { getImageryPreviewUrl, getImageryGeo, getPreviewNote, makePairAttachment } from './lib/filePreview';
 import {
   getImagery,
   submitAnalysis,
@@ -84,8 +84,21 @@ function attachmentFromImagery(imagery) {
     sensor: imagery.sensor || null,
     previewUrl: getImageryPreviewUrl(imagery),
     geo: getImageryGeo(imagery),
+    previewNote: getPreviewNote(imagery),
+    acquisitionDate: imagery.acquisition_date || null,
     imageryId: imagery.id
   };
+}
+
+// The attachment for an uploaded row: a pair bubble when the row belongs to
+// an image pair whose partner is present, otherwise the single attachment.
+function attachmentForImageryRow(imagery, allImagery) {
+  if (!imagery.pair_id) return attachmentFromImagery(imagery);
+  const pair = allImagery
+    .filter(i => i.pair_id === imagery.pair_id)
+    .sort((a, b) => (a.pair_position || 0) - (b.pair_position || 0));
+  if (pair.length !== 2) return attachmentFromImagery(imagery);
+  return makePairAttachment(pair.map(attachmentFromImagery), { pairId: imagery.pair_id });
 }
 
 // A conversation with nothing uploaded or asked in yet (left by the old eager
@@ -104,15 +117,23 @@ function buildConversationScenario(detail) {
   ].sort((a, b) => new Date(a.at) - new Date(b.at));
 
   const chatHistory = [];
+  const shownPairs = new Set();
+  // The most recent upload (single image or pair) is the chat's active image
+  // context, exactly as it was when the chat was left.
+  let latestAttachment = null;
   events.forEach((event) => {
     const ts = formatTime(event.at);
     if (event.kind === 'imagery') {
+      const { imagery } = event;
+      if (imagery.pair_id && shownPairs.has(imagery.pair_id)) return; // its partner already rendered the pair
+      if (imagery.pair_id) shownPairs.add(imagery.pair_id);
+      latestAttachment = attachmentForImageryRow(imagery, detail.imagery);
       chatHistory.push({
-        id: `img-${event.imagery.id}`,
+        id: `img-${imagery.id}`,
         sender: 'user',
         text: '',
         timestamp: ts,
-        attachment: attachmentFromImagery(event.imagery)
+        attachment: latestAttachment
       });
       return;
     }
@@ -130,15 +151,17 @@ function buildConversationScenario(detail) {
     });
   });
 
-  const latestImagery = detail.imagery[detail.imagery.length - 1] || null;
+  const latestImagery = latestAttachment
+    ? detail.imagery.find(i => i.id === latestAttachment.imageryId) || null
+    : null;
   return {
     id: latestImagery?.id || null,
     conversationId: detail.id,
-    title: latestImagery ? latestImagery.name : 'Untitled',
+    title: latestAttachment ? (latestAttachment.isPair ? latestAttachment.name : latestImagery.name) : 'Untitled',
     sensor: latestImagery?.sensor || null,
     resolution: latestImagery ? formatFileSize(latestImagery.file_size) : null,
-    opticalImg: getImageryPreviewUrl(latestImagery),
-    uploadedFile: latestImagery ? attachmentFromImagery(latestImagery) : null,
+    opticalImg: latestAttachment?.previewUrl || null,
+    uploadedFile: latestAttachment,
     chatHistory
   };
 }
@@ -553,7 +576,9 @@ export function App() {
 
     if (promptText) {
       try {
-        const job = await submitAnalysis(imageryId, 'general_analysis', promptText, conversationId);
+        const job = await submitAnalysis(
+          imageryId, 'general_analysis', promptText, conversationId, imageAttachment.comparisonImageryId
+        );
         chatHistory.push({
           id: `ai-${Date.now()}`,
           sender: 'ai',

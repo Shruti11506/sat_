@@ -30,11 +30,15 @@ class AnalysisCreate(BaseModel):
     query: str = Field(..., max_length=2000)
     # Optional so existing clients keep working; the UI always sends it.
     conversation_id: UUID | None = None
+    # Image pair queries: imagery_id is Image 1, this is Image 2. Omitted for
+    # single-image queries.
+    comparison_imagery_id: UUID | None = None
 
 
 class AnalysisCreateResponse(BaseModel):
     job_id: UUID
     imagery_id: UUID
+    comparison_imagery_id: UUID | None = None
     analysis_type: AnalysisType
     query: str
     conversation_id: UUID | None = None

@@ -19,6 +19,7 @@ class JobStatus(str, Enum):
 class JobOut(BaseModel):
     id: UUID
     imagery_id: UUID | None = None
+    comparison_imagery_id: UUID | None = None
     conversation_id: UUID | None = None
     analysis_type: AnalysisType
     query: str | None = None

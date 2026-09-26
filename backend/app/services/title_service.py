@@ -64,6 +64,8 @@ _SAR_RE = re.compile(r"\bsar\b|\bradar\b")
 _CHANGE_RE = re.compile(
     r"\bchang(e|es|ed)\b|\bbi-?temporal\b|\bmulti-?temporal\b|\btime[- ]series\b|\bbefore and after\b"
 )
+# Image-pair queries ("Compare these two images.") that name no topic.
+_COMPARE_RE = re.compile(r"\bcompar(e|es|ed|ing|ison)\b|\bdifferences?\b")
 
 # Noise stripped before the generic fallback: filenames, UUIDs, dates, bare numbers.
 _FILENAME_RE = re.compile(r"\S+\.(tiff?|geotiff|png|jpe?g|jp2|img|hdf|nc)\b", re.IGNORECASE)
@@ -171,6 +173,8 @@ def generate_conversation_title(query: str | None) -> str | None:
         title = f"SAR {label}" if sar else label
     elif sar:
         title = "SAR Analysis"
+    elif _COMPARE_RE.search(text):
+        title = "Image Comparison"
     else:
         fallback = _fallback_title(text)
         if fallback is None:

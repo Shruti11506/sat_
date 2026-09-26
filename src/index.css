@@ -1240,6 +1240,119 @@ code, pre {
   transition: all var(--transition-base);
 }
 
+/* Upload mode (Single Image / Image Pair) -- reuses the nav pill and the
+   dropzone; the active tab gets the pill-cursor gradient directly. */
+.upload-mode-toggle {
+  flex-shrink: 0;
+  margin-bottom: clamp(8px, 1.5vh, 14px);
+}
+.upload-mode-toggle .nav-tab-pill-item {
+  border: 0;
+  background: transparent;
+}
+.upload-mode-toggle .nav-tab-pill-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+[data-theme="dark"] .upload-mode-toggle .nav-tab-pill-item.active {
+  background: linear-gradient(135deg, #0e2444 0%, #153868 50%, #1c4988 100%);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 14px rgba(21, 56, 104, 0.45);
+}
+[data-theme="light"] .upload-mode-toggle .nav-tab-pill-item.active {
+  background: linear-gradient(135deg, #0a2547 0%, #103b6b 50%, #185294 100%);
+}
+
+.pair-dropzones {
+  width: 100%;
+  max-width: 780px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: clamp(6px, 1.2vh, 12px);
+}
+.pair-dropzones .upload-dropzone {
+  margin-bottom: 0;
+  padding: clamp(10px, 1.8vh, 18px) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pair-slot .dropzone-icon-box {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+}
+.pair-slot-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.pair-slot-title {
+  font-size: 0.98rem;
+}
+.pair-slot-preview {
+  max-width: 100%;
+  max-height: clamp(56px, 12vh, 110px);
+  border-radius: var(--radius-md);
+  object-fit: contain;
+}
+.pair-slot-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.pair-slot-file > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pair-slot-meta {
+  max-width: 100%;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.pair-slot-remove {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+}
+.pair-plus {
+  align-self: center;
+  font-size: 1.4rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+.pair-slot-invalid {
+  border-color: rgba(248, 113, 113, 0.6) !important;
+}
+.pair-slot-error,
+.pair-error {
+  font-size: 0.82rem;
+  color: #f87171;
+}
+.pair-error,
+.pair-status {
+  font-size: 0.85rem;
+  margin-bottom: clamp(6px, 1.2vh, 12px);
+}
+@media (max-width: 640px) {
+  .pair-dropzones {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pair-plus {
+    justify-self: center;
+  }
+}
+
 /* Landing hero only: keep the box compact enough to fit one viewport tall. */
 .landing-hero .dropzone-icon-box {
   width: clamp(44px, 6vh, 64px);

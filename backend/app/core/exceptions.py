@@ -34,6 +34,13 @@ class StorageError(ApiError):
         super().__init__(status_code=500, code=code, message=message)
 
 
+class SupabaseNotConfiguredError(ApiError):
+    """backend/.env lacks usable Supabase credentials -- a setup problem, not an outage."""
+
+    def __init__(self, message: str):
+        super().__init__(status_code=503, code="SUPABASE_NOT_CONFIGURED", message=message)
+
+
 class SchemaNotMigratedError(ApiError):
     """A table/function the code needs doesn't exist yet (manual migration pending)."""
 

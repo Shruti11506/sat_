@@ -155,13 +155,27 @@ class FakeBucketHandle:
             raise FakeStorageApiError(f"Bucket not found: {self.bucket_name}")
 
     def list(self, path: str = "", options: dict | None = None):
+        # Like Supabase: the direct children of `path`, by name relative to it,
+        # optionally filtered by options["search"] (a name prefix).
         self._require_bucket()
-        prefix = f"{self.bucket_name}/"
-        return [
-            {"name": key[len(prefix) :]}
+        prefix = f"{self.bucket_name}/{path.strip('/')}/" if path.strip("/") else f"{self.bucket_name}/"
+        search = (options or {}).get("search", "")
+        names = {
+            key[len(prefix):].split("/", 1)[0]
             for key in self.storage.objects
             if key.startswith(prefix)
-        ]
+        }
+        return [{"name": name} for name in sorted(names) if name.startswith(search)]
+
+    def download(self, path: str) -> bytes:
+        self._require_bucket()
+        if self.storage.fail_next_download:
+            self.storage.fail_next_download = False
+            raise FakeStorageApiError("simulated download failure")
+        key = f"{self.bucket_name}/{path}"
+        if key not in self.storage.objects:
+            raise FakeStorageApiError("Object not found", status="400", code="404")
+        return self.storage.objects[key]
 
     def upload(self, path: str, content: bytes, file_options: dict | None = None):
         self._require_bucket()
@@ -209,6 +223,7 @@ class FakeStorage:
         self.fail_next_upload = False
         self.fail_next_upload_too_large = False
         self.fail_next_delete = False
+        self.fail_next_download = False
 
     def from_(self, bucket_name: str) -> FakeBucketHandle:
         return FakeBucketHandle(self, bucket_name)

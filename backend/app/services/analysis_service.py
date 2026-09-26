@@ -17,6 +17,12 @@ def create_analysis(payload: AnalysisCreate) -> dict:
     # Raises NotFoundError(IMAGE_NOT_FOUND) if the imagery doesn't exist.
     imagery_service.get_imagery(str(payload.imagery_id))
 
+    comparison_imagery_id = str(payload.comparison_imagery_id) if payload.comparison_imagery_id else None
+    if comparison_imagery_id:
+        if comparison_imagery_id == str(payload.imagery_id):
+            raise ValidationAppError("INVALID_IMAGE_PAIR", "An image pair needs two different images.")
+        imagery_service.get_imagery(comparison_imagery_id)
+
     conversation_id = str(payload.conversation_id) if payload.conversation_id else None
     if conversation_id:
         # Raises NotFoundError(CONVERSATION_NOT_FOUND) before any row is written.
@@ -27,6 +33,7 @@ def create_analysis(payload: AnalysisCreate) -> dict:
         analysis_type=payload.analysis_type,
         query=payload.query.strip(),
         conversation_id=conversation_id,
+        comparison_imagery_id=comparison_imagery_id,
     )
     if conversation_id:
         conversation_service.touch(conversation_id)

@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { ImageViewer } from './ImageViewer';
 import { uploadImagery, submitAnalysis } from '../lib/apiClient';
-import { getFilePreviewUrl, getImageryGeo, fileExtensionLabel } from '../lib/filePreview';
+import { getFilePreviewUrl, getImageryGeo, getPreviewNote, hasRealPreview, fileExtensionLabel } from '../lib/filePreview';
 
 const QUICK_SUGGESTIONS = [
   { icon: '📄', label: 'Give me the Report', text: 'Give me the report for this satellite scene' },
@@ -43,6 +43,9 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
   // recent upload in this conversation. It persists across messages so
   // follow-up questions ("now calculate the area") refer to the same image.
   const [backendImageryId, setBackendImageryId] = useState(null);
+  // Image 2 when the active context is an image pair (backendImageryId is
+  // then Image 1); null for a single image. Queries send both.
+  const [backendComparisonImageryId, setBackendComparisonImageryId] = useState(null);
   // Conversation this chat belongs to. null for legacy (pre-conversation)
   // chats, and for a chat whose first upload failed (created on next attach).
   const [conversationId, setConversationId] = useState(scenario.conversationId || null);
@@ -62,6 +65,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
     // Carry over the real backend imagery_id if the scene arrived via a real
     // upload (LandingHero) or a restored conversation.
     setBackendImageryId(scenario.uploadedFile?.imageryId || null);
+    setBackendComparisonImageryId(scenario.uploadedFile?.comparisonImageryId || null);
     setConversationId(scenario.conversationId || null);
     setPendingAttachment(null);
   }, [scenario]);
@@ -109,8 +113,10 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
     // A newly attached (and successfully uploaded) image becomes the chat's
     // active image; otherwise the query targets the current one.
     const imageryIdForAnalysis = attachmentPayload ? attachmentPayload.imageryId || null : backendImageryId;
+    const comparisonIdForAnalysis = attachmentPayload ? null : backendComparisonImageryId;
     if (attachmentPayload?.imageryId) {
       setBackendImageryId(attachmentPayload.imageryId);
+      setBackendComparisonImageryId(null); // a newly attached single image replaces a pair
     }
 
     setTimeout(() => {
@@ -147,7 +153,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
     setIsTyping(true);
 
     const conversationForQuery = conversationId;
-    submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery)
+    submitAnalysis(imageryIdForAnalysis, 'general_analysis', query, conversationForQuery, comparisonIdForAnalysis)
       .then((job) => {
         const ack = {
           id: `ai-${Date.now()}`,
@@ -225,7 +231,7 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
           });
           console.info('[SatQuery] Image uploaded to Supabase Storage:', result.bucket, result.storage_path);
           const geo = getImageryGeo(result);
-          settle({ imageryId: result.id, previewUrl: result.thumbnail_url || previewUrl, geo });
+          settle({ imageryId: result.id, previewUrl: result.thumbnail_url || previewUrl, geo, previewNote: getPreviewNote(result) });
           if (viewerAttachmentRef.current === localId) {
             showInViewer(result.thumbnail_url || previewUrl, geo, localId);
           }
@@ -348,8 +354,39 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
             if (isUser) {
               return (
                 <div key={msg.id} className="chat-bubble-user">
+                  {/* Image pair: both real uploads, each clickable into the viewer */}
+                  {msg.attachment?.isPair && msg.attachment.images.map((image, index) => (
+                    <div key={image.imageryId || index} className="chat-user-attachment" style={{ marginTop: index ? 6 : 0 }}>
+                      <div className="chat-user-attachment-thumb-wrap">
+                        <img
+                          src={image.previewUrl}
+                          alt={image.name}
+                          className="chat-user-thumb"
+                          onClick={() => showInViewer(image.previewUrl, image.geo)}
+                          title="Click to view in main satellite panel"
+                        />
+                        <span className="chat-user-thumb-badge">{fileExtensionLabel(image.name)}</span>
+                      </div>
+                      <div className="chat-attachment-info">
+                        <div className="chat-attachment-meta">
+                          <span className="meta-tag">{index === 0 ? 'Image 1 · Reference' : 'Image 2 · Comparison'}</span>
+                        </div>
+                        <div className="chat-attachment-name" title={image.name}>{image.name}</div>
+                        <div className="chat-attachment-meta">
+                          {image.size && <span className="meta-tag">{image.size}</span>}
+                          <span className="meta-tag" title={image.previewNote || undefined}>
+                            {image.previewNote || `Preview ${hasRealPreview(image.previewUrl) ? 'available' : 'unavailable'}`}
+                          </span>
+                          {image.acquisitionDate && (
+                            <span className="meta-tag">Acquired {new Date(image.acquisitionDate).toLocaleDateString()}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+
                   {/* Selected/Attached Image Thumbnail & Metadata (ChatGPT/Gemini style) */}
-                  {msg.attachment && (
+                  {msg.attachment && !msg.attachment.isPair && (
                     <div className="chat-user-attachment">
                       <div className="chat-user-attachment-thumb-wrap">
                         <img 
@@ -367,6 +404,9 @@ export function Workspace({ scenario, onNavigateScreen, onGoBack, onAnalysisSubm
                           {msg.attachment.size && <span className="meta-tag">{msg.attachment.size}</span>}
                           {msg.attachment.sensor && <span className="meta-tag">{msg.attachment.sensor}</span>}
                           {msg.attachment.crs && <span className="meta-tag meta-crs">{msg.attachment.crs}</span>}
+                          {msg.attachment.previewNote && (
+                            <span className="meta-tag" title={msg.attachment.previewNote}>{msg.attachment.previewNote}</span>
+                          )}
                         </div>
                       </div>
                     </div>

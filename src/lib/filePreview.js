@@ -62,6 +62,65 @@ export function getImageryGeo(imagery) {
   return { latitude: imagery.latitude, longitude: imagery.longitude, bbox: imagery.bbox || null };
 }
 
+/**
+ * How a TIFF's preview was made, from what the backend read from the file
+ * (metadata.raster) -- so a band composite is never taken for true colour --
+ * or why there is none. null for formats the browser shows directly.
+ */
+export function getPreviewNote(imagery) {
+  const raster = imagery?.raster || imagery?.metadata?.raster;
+  if (!raster) return null;
+  if (imagery.preview_status === 'failed' || !raster.preview) {
+    return raster.preview_error ? `Preview unavailable: ${raster.preview_error}` : 'Preview unavailable';
+  }
+  const { mode, bands = [] } = raster.preview;
+  const total = raster.properties?.band_count;
+  if (mode === 'true_color') return 'Preview: true colour';
+  if (mode === 'palette') return 'Preview: colour palette';
+  if (mode === 'band_composite') return `Preview: bands ${bands.join('-')} composite, not true colour`;
+  return total > 1 ? `Preview: band ${bands[0]} of ${total}, grayscale` : 'Preview: grayscale';
+}
+
+/** False for the "preview unavailable" placeholder -- i.e. whether the user sees their real image. */
+export function hasRealPreview(previewUrl) {
+  return Boolean(previewUrl) && previewUrl !== UNAVAILABLE_PREVIEW_SVG;
+}
+
+// Mirrors the backend: storage_service.ALLOWED_EXTENSIONS (minus .webp, which
+// the upload screen has never offered) and MAX_UPLOAD_SIZE_MB. The backend
+// re-validates everything; this only saves a pointless upload.
+const SUPPORTED_NAME = /\.(tiff?|png|jpe?g)$/i;
+export const MAX_UPLOAD_MB = 50;
+
+/** Error message for a file the upload would reject, or null when it's fine. */
+export function validateSatelliteFile(file) {
+  if (!SUPPORTED_NAME.test(file?.name || '')) return 'Unsupported format -- use TIFF / GeoTIFF, PNG or JPEG.';
+  if (!file.size) return 'This file is empty.';
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return `This file exceeds the ${MAX_UPLOAD_MB} MB upload limit.`;
+  return null;
+}
+
+/**
+ * The chat attachment for an image pair. Top-level imageryId / previewUrl /
+ * geo are Image 1's, so everything that handles a single attachment (viewer,
+ * query submission) works unchanged; comparisonImageryId is Image 2 and
+ * `images` holds both, in order, for the pair bubble.
+ */
+export function makePairAttachment(images, { pairId = null, conversationId = null } = {}) {
+  const [first, second] = images;
+  return {
+    isPair: true,
+    pairId,
+    conversationId,
+    name: `${first.name} + ${second.name}`,
+    imageryId: first.imageryId || null,
+    comparisonImageryId: second.imageryId || null,
+    previewUrl: first.previewUrl,
+    geo: first.geo || null,
+    images
+  };
+}
+
 /** Real file extension for badges -- never hardcode "GeoTIFF". */
 export function fileExtensionLabel(filename) {
   return filename?.split('.').pop()?.toUpperCase() || 'FILE';

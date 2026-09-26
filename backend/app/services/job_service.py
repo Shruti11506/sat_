@@ -7,9 +7,10 @@ schedules, or simulates AI processing -- jobs are created with status
 import logging
 from uuid import UUID
 
-from app.core.exceptions import NotFoundError, SupabaseError
+from app.core.exceptions import NotFoundError, SchemaNotMigratedError, SupabaseError
 from app.db.supabase import execute_read, get_supabase
 from app.schemas.analysis import AnalysisType
+from app.services.imagery_service import PAIR_MIGRATION_HINT
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ def create_job(
     analysis_type: AnalysisType,
     query: str | None,
     conversation_id: str | None = None,
+    comparison_imagery_id: str | None = None,
 ) -> dict:
     client = get_supabase()
     row = {
@@ -31,11 +33,16 @@ def create_job(
     }
     if conversation_id:
         row["conversation_id"] = conversation_id
+    if comparison_imagery_id:
+        # Only for pair queries, so single-image queries never need migration 0006.
+        row["comparison_imagery_id"] = comparison_imagery_id
 
     try:
         response = client.table(TABLE).insert(row).execute()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Supabase insert failed for analysis_jobs")
+        if comparison_imagery_id and getattr(exc, "code", None) in {"PGRST204", "42703"}:
+            raise SchemaNotMigratedError(PAIR_MIGRATION_HINT) from exc
         raise SupabaseError("Failed to create analysis job.") from exc
 
     if not response.data:

@@ -38,9 +38,31 @@ function satqueryBackend() {
       }
       const backendDir = path.resolve(__dirname, 'backend')
       const python = path.join(backendDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+      // A fresh clone has neither the venv nor backend/.env (both gitignored);
+      // say so loudly, with the fix, instead of a line that scrolls past.
       if (!fs.existsSync(python)) {
-        log.warn(`[satquery] backend NOT started: ${python} not found (see backend/README.md). History and uploads will fail until it runs.`)
+        log.warn([
+          '',
+          '[satquery] ============================================================',
+          '[satquery] Backend NOT started: backend/.venv does not exist yet.',
+          '[satquery] Chat history, uploads and profile will fail until it runs.',
+          '[satquery] First-time setup:  npm run setup   (then restart npm run dev)',
+          '[satquery] ============================================================',
+          '',
+        ].join('\n'))
         return
+      }
+      if (!fs.existsSync(path.join(backendDir, '.env'))) {
+        log.warn([
+          '',
+          '[satquery] ============================================================',
+          '[satquery] backend/.env is missing: the backend will start but cannot',
+          '[satquery] reach Supabase, so chat history will not load.',
+          '[satquery] Copy backend/.env.example to backend/.env and fill in',
+          '[satquery] SUPABASE_URL and SUPABASE_SECRET_KEY (see README.md).',
+          '[satquery] ============================================================',
+          '',
+        ].join('\n'))
       }
       // No --reload: detached on Windows the reloader keeps serving stale code
       // (see CLAUDE.md). Restart `npm run dev` after backend edits.

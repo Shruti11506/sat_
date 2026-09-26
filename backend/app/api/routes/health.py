@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter
 
 from app.core.config import get_settings
+from app.core.exceptions import SupabaseNotConfiguredError
 from app.db.supabase import get_supabase
 from app.schemas.common import ApiResponse, ErrorDetail
 
@@ -61,6 +62,13 @@ def health_supabase() -> ApiResponse[dict]:
 
     try:
         client = get_supabase()
+    except SupabaseNotConfiguredError as exc:
+        # A setup problem on this machine (backend/.env), not an outage -- say exactly what's wrong.
+        return ApiResponse(
+            success=False,
+            data={"supabase": "not_configured", "database": "not_configured", "storage": "not_configured", "bucket": bucket_name},
+            error=ErrorDetail(code=exc.code, message=exc.message),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Supabase client could not be constructed")
         return ApiResponse(

@@ -40,12 +40,29 @@ create table if not exists imagery (
     longitude float,
     bbox jsonb,
     metadata jsonb,
-    created_at timestamptz not null default now()
+    -- Image pairs (migration 0006): shared id + 1 = reference, 2 = comparison.
+    pair_id uuid,
+    pair_position smallint,
+    -- TIFF previews (migration 0007): separate PNG object; storage_path stays the original.
+    preview_path text,
+    preview_status text,
+    created_at timestamptz not null default now(),
+    constraint imagery_pair_position_check check (
+        (pair_id is null and pair_position is null)
+        or (pair_id is not null and pair_position in (1, 2))
+    ),
+    constraint imagery_preview_status_check
+        check (preview_status is null or preview_status in ('ready', 'failed'))
 );
+
+create unique index if not exists imagery_pair_position_uidx
+    on imagery (pair_id, pair_position) where pair_id is not null;
 
 create table if not exists analysis_jobs (
     id uuid primary key default gen_random_uuid(),
     imagery_id uuid references imagery(id),
+    -- Image 2 of an image-pair query (imagery_id is Image 1); NULL otherwise.
+    comparison_imagery_id uuid references imagery(id),
     conversation_id uuid references conversations(id),
     analysis_type text not null,
     query text,

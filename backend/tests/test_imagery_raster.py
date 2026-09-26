@@ -101,14 +101,24 @@ def test_tiff_without_crs_gets_thumbnail_but_no_coordinates(client):
 
 
 def test_thumbnail_upload_failure_keeps_the_upload(client, fake_supabase, monkeypatch):
-    from app.services import imagery_service
+    from app.services import storage_service
 
-    monkeypatch.setattr(imagery_service, "upload_thumbnail", lambda *a, **k: False)
+    real_upload = storage_service.upload_file
+
+    def fail_previews(client_, path, content, content_type, upsert=False):
+        if path.endswith("/thumbnail.png"):
+            raise storage_service.StorageError("simulated")
+        return real_upload(client_, path, content, content_type, upsert)
+
+    monkeypatch.setattr(storage_service, "upload_file", fail_previews)
     response = _upload(client, "scene.tif", _geotiff())
     assert response.status_code == 201
     data = response.json()["data"]
     assert data["thumbnail_url"] is None
+    assert data["preview_status"] == "failed" and data["preview_path"] is None
+    assert data["raster"]["preview_error"] == "The preview was generated but could not be stored."
     assert data["latitude"] is not None  # coordinates come from the file, not the thumbnail
+    assert list(fake_supabase.storage.objects) == [f"Satquery/{data['storage_path']}"]  # original kept
 
 
 def test_png_upload_is_unaffected(client, fake_supabase, monkeypatch):
@@ -142,7 +152,7 @@ def test_thumbnail_is_downscaled_and_masks_nodata():
 def test_named_sentinel2_bands_render_as_true_colour():
     content = _geotiff(count=4, descriptions=["B2", "B3", "B4", "B8"])
     with MemoryFile(content) as mem, mem.open() as src:
-        assert raster_service._pick_bands(src) == [3, 2, 1]
+        assert raster_service._pick_bands(src) == ([3, 2, 1], "true_color")
 
 
 def test_single_band_renders_grayscale():

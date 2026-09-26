@@ -164,14 +164,12 @@ def get_conversation_detail(conversation_id: str) -> dict:
     """The conversation plus its uploads (with fresh access URLs) and queries, oldest first."""
     conversation = get_conversation(conversation_id)
     client = get_supabase()
-    imagery = [
-        {
-            **row,
-            "url": storage_service.resolve_url(client, row.get("storage_path")),
-            "thumbnail_url": imagery_service.resolve_thumbnail_url(client, row.get("storage_path")),
-        }
-        for row in _select_for_conversation("imagery", conversation_id)
-    ]
+    imagery = []
+    for stored in _select_for_conversation("imagery", conversation_id):
+        row = {**stored, "url": storage_service.resolve_url(client, stored.get("storage_path"))}
+        # May fill in (once) the preview of an older TIFF row -- see resolve_thumbnail_url.
+        row["thumbnail_url"] = imagery_service.resolve_thumbnail_url(client, row)
+        imagery.append(row)
     jobs = _select_for_conversation("analysis_jobs", conversation_id)
     return {**conversation, "imagery": imagery, "jobs": jobs}
 

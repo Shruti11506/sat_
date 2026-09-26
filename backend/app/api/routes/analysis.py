@@ -24,6 +24,7 @@ def create_analysis(payload: AnalysisCreate) -> ApiResponse[AnalysisCreateRespon
         AnalysisCreateResponse(
             job_id=job["id"],
             imagery_id=job["imagery_id"],
+            comparison_imagery_id=job.get("comparison_imagery_id"),
             analysis_type=job["analysis_type"],
             query=job["query"],
             conversation_id=job.get("conversation_id"),

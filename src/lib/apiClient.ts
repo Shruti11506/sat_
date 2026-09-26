@@ -35,15 +35,25 @@ export class ApiRequestError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      // Never set Content-Type for FormData -- the browser must generate the
-      // multipart boundary itself, and a manual header here breaks parsing.
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...init?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        // Never set Content-Type for FormData -- the browser must generate the
+        // multipart boundary itself, and a manual header here breaks parsing.
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...init?.headers,
+      },
+    });
+  } catch {
+    // The browser only says "Failed to fetch": name what it couldn't reach.
+    // On a fresh clone this means the local backend isn't running (see README).
+    throw new ApiRequestError(0, {
+      code: "BACKEND_UNREACHABLE",
+      message: `Cannot reach the SatQuery backend at ${API_BASE_URL} -- is it running? (see README.md)`,
+    });
+  }
 
   const body: ApiResponse<T> = await response.json();
 
@@ -101,6 +111,21 @@ export interface ImageryUploadResult {
   longitude?: number | null;
   bbox?: Record<string, unknown> | null;
   cloud_cover?: number | null;
+  acquisition_date?: string | null;
+  /** Image pairs only: shared id, and 1 = Image 1 (reference) / 2 = Image 2 (comparison). */
+  pair_id?: string | null;
+  pair_position?: 1 | 2 | null;
+  /** TIFF only: generated PNG preview (the original stays at storage_path). */
+  preview_path?: string | null;
+  preview_status?: "ready" | "failed" | null;
+  /** TIFF only: what the file is (properties), how the preview was made, preview_error. */
+  raster?: Record<string, unknown> | null;
+}
+
+export interface ImageryPairUploadResult {
+  pair_id: string;
+  image_1: ImageryUploadResult;
+  image_2: ImageryUploadResult;
 }
 
 export interface ImageryRecord extends ImageryPayload {
@@ -113,6 +138,12 @@ export interface ImageryRecord extends ImageryPayload {
   url: string | null;
   /** Signed URL of the PNG preview generated for a TIFF/GeoTIFF; null when there is none. */
   thumbnail_url?: string | null;
+  /** Image pairs only: shared id, and 1 = Image 1 (reference) / 2 = Image 2 (comparison). */
+  pair_id?: string | null;
+  pair_position?: 1 | 2 | null;
+  /** TIFF only: generated PNG preview path; "failed" when none could be made. */
+  preview_path?: string | null;
+  preview_status?: "ready" | "failed" | null;
   created_at: string;
 }
 
@@ -139,6 +170,23 @@ export function uploadImagery(
   if (meta?.conversationId) form.append("conversation_id", meta.conversationId);
 
   return request<ImageryUploadResult>("/imagery/upload", {
+    method: "POST",
+    body: form,
+  });
+}
+
+/**
+ * Uploads an image pair (Image 1 = reference, Image 2 = comparison) in one
+ * request. Both files are stored independently; the backend stores both or
+ * neither.
+ */
+export function uploadImageryPair(image1: File, image2: File, meta?: { conversationId?: string }) {
+  const form = new FormData();
+  form.append("image_1", image1);
+  form.append("image_2", image2);
+  if (meta?.conversationId) form.append("conversation_id", meta.conversationId);
+
+  return request<ImageryPairUploadResult>("/imagery/pair", {
     method: "POST",
     body: form,
   });
@@ -183,6 +231,8 @@ export type AnalysisType =
 export interface AnalysisCreateResult {
   job_id: string;
   imagery_id: string;
+  /** Image 2 of an image-pair query; null for single-image queries. */
+  comparison_imagery_id?: string | null;
   analysis_type: AnalysisType;
   query: string;
   conversation_id: string | null;
@@ -194,7 +244,9 @@ export function submitAnalysis(
   imageryId: string,
   analysisType: AnalysisType,
   query: string,
-  conversationId?: string | null
+  conversationId?: string | null,
+  /** Image pairs: imageryId is Image 1, this is Image 2. */
+  comparisonImageryId?: string | null
 ) {
   return request<AnalysisCreateResult>("/analysis", {
     method: "POST",
@@ -203,6 +255,7 @@ export function submitAnalysis(
       analysis_type: analysisType,
       query,
       conversation_id: conversationId || null,
+      ...(comparisonImageryId ? { comparison_imagery_id: comparisonImageryId } : {}),
     }),
   });
 }
@@ -213,6 +266,8 @@ export const createAnalysis = submitAnalysis;
 export interface HistoryItem {
   job_id: string;
   imagery_id: string;
+  /** Image 2 of an image-pair query; null for single-image queries. */
+  comparison_imagery_id?: string | null;
   /** null for requests made before conversations existed (legacy history). */
   conversation_id: string | null;
   imagery_name: string | null;

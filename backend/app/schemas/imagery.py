@@ -49,6 +49,28 @@ class ImageryUploadResponse(BaseModel):
     longitude: float | None = None
     bbox: dict[str, Any] | None = None
     cloud_cover: float | None = None
+    acquisition_date: datetime | None = None
+    pair_id: UUID | None = Field(default=None, description="Set for the two images of an image pair.")
+    pair_position: int | None = Field(default=None, description="1 = Image 1 (reference), 2 = Image 2 (comparison).")
+    preview_path: str | None = Field(
+        default=None, description="Storage path of the generated PNG preview (TIFF only); the original stays at storage_path."
+    )
+    preview_status: str | None = Field(
+        default=None, description='"ready", "failed" (TIFF whose preview could not be made), or null (not a TIFF).'
+    )
+    raster: dict[str, Any] | None = Field(
+        default=None,
+        description="TIFF only: properties read from the file (size, bands, dtype, CRS, transform, bounds, nodata), "
+        "how the preview was composed, and preview_error when there is no preview.",
+    )
+
+
+class ImageryPairUploadResponse(BaseModel):
+    """POST /imagery/pair: both stored images, each in the single-upload shape."""
+
+    pair_id: UUID
+    image_1: ImageryUploadResponse
+    image_2: ImageryUploadResponse
 
 
 class ImageryOut(BaseModel):
@@ -77,6 +99,10 @@ class ImageryOut(BaseModel):
     longitude: float | None = None
     bbox: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+    pair_id: UUID | None = None
+    pair_position: int | None = None
+    preview_path: str | None = None
+    preview_status: str | None = None
     created_at: datetime | None = None
 
 

@@ -22,6 +22,7 @@ from app.schemas.imagery import (
     ImageryCreateResponse,
     ImageryDeleteResponse,
     ImageryOut,
+    ImageryPairUploadResponse,
     ImageryUploadResponse,
 )
 from app.services import conversation_service, imagery_service, raster_service, storage_service
@@ -99,27 +100,34 @@ async def upload_imagery(
     # If this raises, no database record is created -- see storage_service.upload_file.
     storage_service.upload_file(client, storage_path, content, resolved_content_type)
 
-    row = imagery_service.create_imagery_from_upload(
-        name=name or file.filename,
-        original_filename=file.filename,
-        bucket=settings.SUPABASE_STORAGE_BUCKET,
-        storage_path=storage_path,
-        mime_type=resolved_content_type,
-        file_size=len(content),
-        source=source,
-        sensor=sensor,
-        acquisition_date=acquisition_date,
-        metadata=parsed_metadata,
-        conversation_id=str(conversation_id) if conversation_id else None,
-        raster=raster,
-    )
+    # The preview is a separate object next to the untouched original, stored
+    # before the row so the row records it (preview_path / preview_status).
+    preview = imagery_service.store_preview(client, storage_path, raster) if raster else None
+
+    try:
+        row = imagery_service.create_imagery_from_upload(
+            name=name or file.filename,
+            original_filename=file.filename,
+            bucket=settings.SUPABASE_STORAGE_BUCKET,
+            storage_path=storage_path,
+            mime_type=resolved_content_type,
+            file_size=len(content),
+            source=source,
+            sensor=sensor,
+            acquisition_date=acquisition_date,
+            metadata=parsed_metadata,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            raster=raster,
+            preview=preview,
+        )
+    except Exception:
+        # No row -> don't leave the objects this request stored behind.
+        imagery_service.discard_uploaded(client, [storage_path, (preview or {}).get("preview_path")])
+        raise
     if conversation_id:
         conversation_service.touch(str(conversation_id))
 
-    # Last, so a failed DB insert above can't leave an orphaned thumbnail too.
-    thumbnail_url = None
-    if raster and raster.thumbnail_png and imagery_service.upload_thumbnail(client, storage_path, raster.thumbnail_png):
-        thumbnail_url = imagery_service.resolve_thumbnail_url(client, storage_path)
+    thumbnail_url = imagery_service.resolve_thumbnail_url(client, row)
 
     return ApiResponse.ok(
         ImageryUploadResponse(
@@ -136,6 +144,75 @@ async def upload_imagery(
             longitude=row.get("longitude"),
             bbox=row.get("bbox"),
             cloud_cover=row.get("cloud_cover"),
+            preview_path=row.get("preview_path"),
+            preview_status=row.get("preview_status"),
+            raster=(row.get("metadata") or {}).get("raster"),
+        )
+    )
+
+
+def _pair_image_response(row: dict, thumbnail_url: str | None) -> ImageryUploadResponse:
+    fields = {key: row.get(key) for key in ImageryUploadResponse.model_fields if key in row and key != "raster"}
+    return ImageryUploadResponse(
+        **fields,
+        thumbnail_url=thumbnail_url,
+        raster=(row.get("metadata") or {}).get("raster"),
+    )
+
+
+@router.post(
+    "/pair",
+    response_model=ApiResponse[ImageryPairUploadResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload an image pair (Image 1 = reference, Image 2 = comparison) as two stored images",
+)
+async def upload_imagery_pair(
+    image_1: UploadFile | None = File(default=None, description="Image 1 -- reference image"),
+    image_2: UploadFile | None = File(default=None, description="Image 2 -- comparison image"),
+    conversation_id: UUID | None = Form(
+        default=None,
+        description="Conversation both images belong to. Never changes the conversation's title.",
+    ),
+) -> ApiResponse[ImageryPairUploadResponse]:
+    # Everything is validated before anything is stored, so a bad Image 2
+    # can never leave Image 1 behind.
+    if image_1 is None or image_2 is None:
+        raise ValidationAppError("IMAGE_PAIR_INCOMPLETE", "Please upload both images.")
+    if conversation_id:
+        conversation_service.get_conversation(str(conversation_id))
+
+    images: list[imagery_service.PairImage] = []
+    for label, upload in (("Image 1", image_1), ("Image 2", image_2)):
+        content = await upload.read()
+        try:
+            content_type = storage_service.validate_upload(
+                filename=upload.filename or "", content_type=upload.content_type, size=len(content)
+            )
+        except ValidationAppError as exc:
+            raise ValidationAppError(exc.code, f"{label}: {exc.message}") from exc
+        images.append(imagery_service.PairImage(filename=upload.filename, content=content, content_type=content_type))
+
+    logger.info(
+        "Received image pair: %s (%d bytes) + %s (%d bytes)",
+        images[0].filename, len(images[0].content), images[1].filename, len(images[1].content),
+    )
+
+    # Same TIFF/GeoTIFF handling as single uploads, per image.
+    for image in images:
+        if imagery_service.has_raster_source(image.filename):
+            image.raster = await run_in_threadpool(raster_service.extract, image.content)
+
+    pair_id, rows, thumbnails = await run_in_threadpool(
+        imagery_service.store_image_pair, images, str(conversation_id) if conversation_id else None
+    )
+    if conversation_id:
+        conversation_service.touch(str(conversation_id))
+
+    return ApiResponse.ok(
+        ImageryPairUploadResponse(
+            pair_id=pair_id,
+            image_1=_pair_image_response(rows[0], thumbnails[0]),
+            image_2=_pair_image_response(rows[1], thumbnails[1]),
         )
     )
 

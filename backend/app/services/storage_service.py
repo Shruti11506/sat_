@@ -81,8 +81,12 @@ def build_storage_path(filename: str, prefix: str = IMAGERY_PREFIX) -> str:
     return f"{prefix}/{unique_id}/{safe_filename}"
 
 
-def upload_file(client, storage_path: str, content: bytes, content_type: str) -> None:
-    """Upload bytes to the configured bucket. Raises StorageError on any failure."""
+def upload_file(client, storage_path: str, content: bytes, content_type: str, upsert: bool = False) -> None:
+    """Upload bytes to the configured bucket. Raises StorageError on any failure.
+
+    upsert: overwrite an existing object -- only for generated previews, which
+    two concurrent requests may both write; never for user originals.
+    """
     settings = get_settings()
     bucket = settings.SUPABASE_STORAGE_BUCKET
 
@@ -98,7 +102,7 @@ def upload_file(client, storage_path: str, content: bytes, content_type: str) ->
         result = client.storage.from_(bucket).upload(
             storage_path,
             content,
-            {"content-type": content_type},
+            {"content-type": content_type, **({"upsert": "true"} if upsert else {})},
         )
     except Exception as exc:  # noqa: BLE001 - translate any client/network failure
         logger.exception("Supabase Storage upload raised for %s/%s", bucket, storage_path)
@@ -132,6 +136,28 @@ def upload_file(client, storage_path: str, content: bytes, content_type: str) ->
         )
 
     logger.info("Upload succeeded: bucket=%s path=%s", bucket, storage_path)
+
+
+def download_file(client, storage_path: str) -> bytes:
+    """Read an object's bytes. Raises StorageError on any failure."""
+    settings = get_settings()
+    try:
+        return client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).download(storage_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supabase Storage download failed for %s", storage_path)
+        raise StorageError("Failed to read the file from Supabase Storage.", code="STORAGE_DOWNLOAD_FAILED") from exc
+
+
+def object_exists(client, storage_path: str) -> bool:
+    """Whether an object exists (lists its folder; no download)."""
+    settings = get_settings()
+    folder, name = storage_path.rsplit("/", 1)
+    try:
+        entries = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).list(folder, {"search": name})
+    except Exception:  # noqa: BLE001
+        logger.warning("Supabase Storage list failed for %s", folder)
+        return False
+    return any((entry or {}).get("name") == name for entry in entries or [])
 
 
 def delete_file(client, storage_path: str) -> None:

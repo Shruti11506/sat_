@@ -15,11 +15,18 @@ from app.api.routes import settings as settings_routes  # `settings` below is th
 from app.core.config import get_settings
 from app.core.exceptions import ApiError
 from app.core.logging import configure_logging
+from app.db.supabase import supabase_config_problem
 from app.schemas.common import ApiResponse
 
 settings = get_settings()
 configure_logging(settings.APP_ENV)
 logger = logging.getLogger(__name__)
+
+# Said once at startup, in the terminal running the backend (e.g. `npm run dev`):
+# on a fresh clone this is the usual reason history won't load.
+_supabase_problem = supabase_config_problem(settings)
+if _supabase_problem:
+    logger.warning("[satquery] %s", _supabase_problem)
 
 app = FastAPI(
     title=settings.APP_NAME,
